@@ -1,0 +1,29 @@
+# Auto-detect text files, ensure they're normalized (fixes CRLF vs LF issues across Windows/Linux/Mac)
+* text=auto
+
+# Explicitly set text files you want to always be normalized and converted to native line endings on checkout
+*.js text
+*.ts text
+*.json text
+*.md text
+*.html text
+*.css text
+
+# Shell scripts must always have LF line endings for Linux/Docker compatibility
+*.sh text eol=lf
+
+# PowerShell and Batch files must be CRLF
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Audio files should be treated as binary so Git doesn't try to change their line endings
+*.mp3 binary
+*.wav binary
+*.ogg binary
+*.flac binary
+*.m4a binary
+*.webm binary
+
+# Prevent merge conflicts on package-lock.json
+package-lock.json -merge

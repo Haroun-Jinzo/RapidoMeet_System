@@ -1,0 +1,65 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Dependency directories
+node_modules/
+venv/
+
+# Build output
+dist/
+build/
+out/
+
+# Environment variables (CRITICAL: Prevents API keys from being committed)
+.env
+.env.local
+.env.example
+.env.development.local
+.env.test.local
+.env.production.local
+.env.backup
+*.pem
+
+# Coverage directory
+coverage/
+.nyc_output/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Typescript v1 declaration files
+typings/
+
+# Editor directories and files
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# audio
+*.mp3
+*.wav
+
+# test outputs
+*.json
+
+# executables
+*.ps1
+*.sh
