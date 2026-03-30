@@ -28,34 +28,40 @@ class Notifier implements INotifier {
   private USE_OPENCLAW = process.env.USE_OPENCLAW === "true";
 
   // ── notifyAll ──────────────────────────────────────────────────────────────
-  // Sends the report to all specified channels simultaneously.
-  // Uses Promise.allSettled so one channel failing never blocks others.
-  // You always get results for every channel regardless of failures.
+  // In OpenClaw mode: Sends one consolidated JSON report to the Gateway.
+  // In Direct mode: Sends formatted strings to each channel individually.
 
   async notifyAll(
     report:    IFormattedReport,
     channels:  NotificationChannel[],
-    sessionId: string
+    sessionId: string,
+    sessionData?: any // Passing raw session data for OpenClaw Gateway
   ): Promise<INotificationResult[]> {
-    console.log(
-      `[Notifier] Sending to ${channels.length} channel(s): ${channels.join(", ")}`
-    );
+    console.log(`[Notifier] Processing notifications for: ${channels.join(", ")}`);
 
-    // Send to all channels simultaneously — don't wait for one before starting next
+    // ── OpenClaw Gateway Mode (Production) ──
+    if (this.USE_OPENCLAW) {
+      const result = await this.sendViaOpenClawGateway(channels, sessionData || report, sessionId);
+      // The gateway distributed it to all channels, return success for all
+      return channels.map(channel => ({
+        channel,
+        success: result.success,
+        error: result.error
+      }));
+    }
+
+    // ── Direct API Mode (Demo) ──
     const promises = channels.map(channel =>
-      this.notify(channel, this.getMessageForChannel(report, channel), sessionId)
+      this.sendDirect(channel, this.getMessageForChannel(report, channel), sessionId)
     );
 
-    // allSettled = never throws, always returns results array
     const settled = await Promise.allSettled(promises);
 
     return settled.map((result, i) => {
       if (result.status === "fulfilled") {
         return result.value;
       } else {
-        console.error(
-          `[Notifier] ${channels[i]} failed:`, result.reason
-        );
+        console.error(`[Notifier] ${channels[i]} direct failed:`, result.reason);
         return {
           channel: channels[i],
           success: false,
@@ -63,22 +69,6 @@ class Notifier implements INotifier {
         };
       }
     });
-  }
-
-  // ── notify ─────────────────────────────────────────────────────────────────
-  // Sends a single message to one channel.
-  // Routes to OpenClaw or direct API depending on USE_OPENCLAW.
-
-  async notify(
-    channel:   NotificationChannel,
-    message:   string,
-    sessionId: string
-  ): Promise<INotificationResult> {
-    if (this.USE_OPENCLAW) {
-      return this.sendViaOpenClaw(channel, message, sessionId);
-    } else {
-      return this.sendDirect(channel, message, sessionId);
-    }
   }
 
   // ── PRIVATE: getMessageForChannel ─────────────────────────────────────────
@@ -304,14 +294,15 @@ class Notifier implements INotifier {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // OPENCLAW MODE (production — calls Michael's AWS deployment)
+  // OPENCLAW GATEWAY MODE (production — calls the external distribution service)
+  // Receives the consolidated JSON report and formats it downstream.
   // ══════════════════════════════════════════════════════════════════════════
 
-  private async sendViaOpenClaw(
-    channel:   NotificationChannel,
-    message:   string,
+  private async sendViaOpenClawGateway(
+    channels:  NotificationChannel[],
+    jsonData:  any,
     sessionId: string
-  ): Promise<INotificationResult> {
+  ): Promise<{ success: boolean; error?: string }> {
     const openClawUrl = process.env.OPENCLAW_URL;
 
     if (!openClawUrl) {
@@ -322,6 +313,7 @@ class Notifier implements INotifier {
     }
 
     try {
+      // Post the entire JSON structure so OpenClaw Gateway can format it.
       const response = await fetch(`${openClawUrl}/distribute`, {
         method:  "POST",
         headers: {
@@ -330,9 +322,9 @@ class Notifier implements INotifier {
           "X-Session-Id":  sessionId,
         },
         body: JSON.stringify({
-          channel,
-          message,
-          session_id: sessionId,
+          target_channels: channels,
+          session_payload: jsonData,
+          session_id:      sessionId,
         }),
         signal: AbortSignal.timeout(15_000),
       });
@@ -340,19 +332,19 @@ class Notifier implements INotifier {
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(
-          `OpenClaw returned ${response.status}: ${errorText}`
+          `OpenClaw Gateway returned ${response.status}: ${errorText}`
         );
       }
 
       console.log(
-        `[Notifier] ✓ OpenClaw → ${channel} (session: ${sessionId})`
+        `[Notifier] ✓ Consolidated JSON delivered to OpenClaw Gateway (session: ${sessionId})`
       );
-      return { channel, success: true };
+      return { success: true };
 
     } catch (error) {
       const err = error as Error;
-      console.error(`[Notifier] OpenClaw → ${channel} failed:`, err.message);
-      return { channel, success: false, error: err.message };
+      console.error(`[Notifier] OpenClaw Gateway delivery failed:`, err.message);
+      return { success: false, error: err.message };
     }
   }
 }

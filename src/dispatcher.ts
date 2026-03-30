@@ -2,12 +2,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // C4 Level 3: MCP Dispatcher
 // Interface:  IMCPDispatcher (from interfaces.ts)
-// Responsibility: Execute IAction objects by calling N8N webhooks.
+// Responsibility: Execute IAction objects by calling external MCP servers.
 //                 Implements retry logic (max 3 attempts, exponential backoff).
-//                 The ONLY module that calls N8N webhooks.
-// Dependencies: N8N_WEBHOOK_BASE_URL, N8N_API_KEY environment variables.
+//                 Uses @modelcontextprotocol/sdk to call tools directly.
+//                 Connects to 5 distinct MCP domain servers.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   IMCPDispatcher,
   IAction,
@@ -15,27 +17,7 @@ import {
   MCPTool,
 } from "./interfaces";
 
-// ── N8N webhook path mapping ──────────────────────────────────────────────────
-// Maps each MCPTool enum value to its N8N webhook path.
-// When N8N is set up, each path corresponds to one workflow.
-//
-// Format: POST {N8N_WEBHOOK_BASE_URL}/webhook/{path}
-
-const WEBHOOK_PATHS: Record<MCPTool, string> = {
-  "crm.create_contact":     "rapidomeet-crm-contact",
-  "crm.create_opportunity": "rapidomeet-crm-opportunity",
-  "crm.log_activity":       "rapidomeet-crm-activity",
-  "calendar.create_event":  "rapidomeet-calendar-event",
-  "email.send_recap":       "rapidomeet-email-recap",
-  "db.save_task":           "rapidomeet-task-save",
-  "n8n.trigger_workflow":   "rapidomeet-custom-workflow",
-};
-
-// ── Mock responses for testing without N8N ───────────────────────────────────
-// When N8N_READY = false, the dispatcher returns these fake responses.
-// Each response is realistic enough to test the full pipeline end to end.
-// Flip N8N_READY = true the moment Michael gives you N8N access.
-
+// ── Mock responses for testing without actual MCP servers running ────────────
 const MOCK_RESPONSES: Record<MCPTool, Record<string, unknown>> = {
   "crm.create_contact":     { contact_id: `crm_${Date.now()}`,       status: "created" },
   "crm.create_opportunity": { opportunity_id: `opp_${Date.now()}`,   status: "created" },
@@ -50,16 +32,19 @@ const MOCK_RESPONSES: Record<MCPTool, Record<string, unknown>> = {
 
 class MCPDispatcher implements IMCPDispatcher {
 
-  // ── Flip this to true when N8N webhooks are configured ──────────────────────
-  // This is the ONLY line you change when N8N becomes available.
-  private N8N_READY = false;
+  // Map of domain to an active MCP Client (managing the 5 distinct servers)
+  private mcpClients: Map<string, Client> = new Map();
+  
+  // ── Flip this to true when MCP servers are ready ───────────────────────────
+  private MCP_READY = false;
 
   // ── execute ────────────────────────────────────────────────────────────────
   // Executes one action with up to 3 retry attempts.
   // Uses exponential backoff: wait 1s, then 2s, then 4s between retries.
+
   //
   // Exponential backoff explanation:
-  //   If N8N is temporarily overloaded, hammering it every 100ms makes things
+  //   If MCP tools are temporarily overloaded, hammering it every 100ms makes things
   //   worse. Waiting longer between each retry gives it time to recover.
 
   async execute(action: IAction): Promise<IDispatchResult> {
@@ -67,9 +52,14 @@ class MCPDispatcher implements IMCPDispatcher {
     let   lastError   = "";
     let   retryCount  = 0;
 
+    // Ensure clients are connected before executing
+    if (this.MCP_READY && this.mcpClients.size === 0) {
+      await this.initClients();
+    }
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const result = await this.callWebhook(action);
+        const result = await this.callMCPTool(action);
 
         // Success — update action status and return
         action.status = "executed";
@@ -211,17 +201,56 @@ class MCPDispatcher implements IMCPDispatcher {
     return this.execute(action);
   }
 
-  // ── PRIVATE: callWebhook ───────────────────────────────────────────────────
-  // The actual HTTP call to N8N.
-  // In mock mode, returns a fake response immediately.
-  // In live mode, calls the real N8N webhook URL.
+  // ── PRIVATE: initialize MCP Clients ────────────────────────────────────────
+  // Configures connections to the 5 MCP servers specified in the architecture.
+  private async initClients() {
+    const servers = {
+      crm:      process.env.MCP_CRM_URL      || "http://localhost:3001/sse",
+      calendar: process.env.MCP_CALENDAR_URL || "http://localhost:3002/sse",
+      email:    process.env.MCP_EMAIL_URL    || "http://localhost:3003/sse",
+      n8n:      process.env.MCP_N8N_URL      || "http://localhost:3004/sse",
+      files:    process.env.MCP_FILES_URL    || "http://localhost:3005/sse",
+    };
 
-  private async callWebhook(
+    for (const [domain, url] of Object.entries(servers)) {
+      try {
+        const transport = new StreamableHTTPClientTransport(new URL(url));
+        const client = new Client(
+          { name: "RapidoMeetOrchestrator", version: "1.0.0" }, 
+          { capabilities: {} }
+        );
+        
+        // Note: In production you may await connect lazily or continuously retry
+        await client.connect(transport);
+        this.mcpClients.set(domain, client);
+        console.log(`[Dispatcher] Connected to ${domain.toUpperCase()} MCP server at ${url}`);
+      } catch (err) {
+        console.warn(`[Dispatcher] Failed to connect to ${domain.toUpperCase()} MCP server: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  // ── PRIVATE: determineDomain ───────────────────────────────────────────────
+  // Maps an MCPTool string to its respective Domain client.
+  private getDomainForTool(tool: string): string {
+    if (tool.startsWith("crm.")) return "crm";
+    if (tool.startsWith("calendar.")) return "calendar";
+    if (tool.startsWith("email.")) return "email";
+    if (tool.startsWith("db.")) return "files"; // routing DB tasks to files/data MCP
+    if (tool.startsWith("n8n.")) return "n8n";
+    return "n8n"; // Default fallback
+  }
+
+  // ── PRIVATE: callMCPTool ───────────────────────────────────────────────────
+  // The actual JSON-RPC call to the proper MCP server via the SDK.
+  // In mock mode, returns a fake response immediately.
+
+  private async callMCPTool(
     action: IAction
   ): Promise<Record<string, unknown>> {
 
     // ── MOCK MODE ──────────────────────────────────────────────────────────
-    if (!this.N8N_READY) {
+    if (!this.MCP_READY) {
       console.log(
         `[Dispatcher] 🟡 MOCK — ${action.tool}`,
         JSON.stringify(action.params, null, 2)
@@ -242,48 +271,27 @@ class MCPDispatcher implements IMCPDispatcher {
     }
     // ── END MOCK MODE ──────────────────────────────────────────────────────
 
-    // ── LIVE MODE — real N8N webhook call ──────────────────────────────────
-    const baseUrl     = process.env.N8N_WEBHOOK_BASE_URL;
-    const apiKey      = process.env.N8N_API_KEY;
-    const webhookPath = WEBHOOK_PATHS[action.tool];
-
-    if (!baseUrl) {
-      throw new Error("N8N_WEBHOOK_BASE_URL is not set in environment variables");
+    // ── LIVE MODE — real MCP Tool call ──────────────────────────────────
+    const domain = this.getDomainForTool(action.tool);
+    const client = this.mcpClients.get(domain);
+    
+    if (!client) {
+      throw new Error(`MCP Client for domain "${domain}" is not connected.`);
     }
+    
+    try {
+      // Execute true MCP Tool call via standardized JSON-RPC over SSE
+      const result = await client.callTool({
+        name: action.tool,
+        arguments: action.params as Record<string, unknown>
+      });
 
-    const url = `${baseUrl}/webhook/${webhookPath}`;
-
-    const response = await fetch(url, {
-      method:  "POST",
-      headers: {
-        "Content-Type":    "application/json",
-        "X-Webhook-Auth":  apiKey || "",
-        // Send session context so N8N can log which meeting triggered this
-        "X-Session-Id":    action.id,
-      },
-      body: JSON.stringify({
-        ...action.params,
-        _action_id:  action.id,
-        _tool:       action.tool,
-      }),
-      // 2 minute timeout — N8N may need time to call external APIs and services
-      // Some integrations (CRM, Calendar, Email) require 30-60 seconds
-      signal: AbortSignal.timeout(120_000),
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => "no body");
-      throw new Error(
-        `N8N webhook ${webhookPath} returned ${response.status}: ${errorBody}`
-      );
+      // Based on MCP standard, result has { content: [...] }
+      const content = result.content;
+      return { _mcpStatus: "success", tool: action.tool, content } as Record<string, unknown>;
+    } catch (error) {
+      throw new Error(`MCP tool ${action.tool} execution failed: ${(error as Error).message}`);
     }
-
-    // N8N always returns JSON — if it doesn't, something is wrong
-    const result = await response.json().catch(() => {
-      throw new Error(`N8N returned non-JSON response for ${webhookPath}`);
-    }) as Record<string, unknown>;
-
-    return result;
   }
 
   // ── PRIVATE: sleep ─────────────────────────────────────────────────────────

@@ -223,10 +223,13 @@ app.post(
       let notifications: any[] = [];
       try {
         const channels: NotificationChannel[] = ["telegram"];
+        // Passing 'session' directly as the 4th argument so OpenClaw Gateway 
+        // receives the raw metadata JSON instead of just strings
         notifications = await notifier.notifyAll(
           report,
           channels,
-          session.id
+          session.id,
+          session // <--- Raw JSON payload passed here
         );
       } catch (notifyErr) {
         console.warn("[Pipeline] Notification failed (non-fatal):", (notifyErr as Error).message);
