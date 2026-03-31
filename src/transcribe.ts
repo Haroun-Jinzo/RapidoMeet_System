@@ -1,3 +1,5 @@
+import FormData from 'form-data';
+import fetch from 'node-fetch';
 // src/transcribe.ts
 // ─────────────────────────────────────────────────────────────────────────────
 // C4 Level 3: Transcription
@@ -75,117 +77,50 @@ class Transcriber implements ITranscriber {
     audioPath: string,
     language: string
   ): Promise<ITranscriptionResult> {
-    console.log(`[Transcriber] Using local faster-whisper for transcription`);
+    console.log(`[Transcriber] Using FastAPI faster-whisper service for transcription`);
 
-    return new Promise((resolve, reject) => {
-      const pythonCode = [
-        'import json',
-        'import sys',
-        'from faster_whisper import WhisperModel',
-        '',
-        'try:',
-        `    model = WhisperModel("${LOCAL_WHISPER_CONFIG.model}", device="${LOCAL_WHISPER_CONFIG.device}", compute_type="${LOCAL_WHISPER_CONFIG.computeType}")`,
-        `    segments, info = model.transcribe("${audioPath.replace(/\\/g, '/')}", language="${language}", beam_size=5)`,
-        '    ',
-        '    transcript = ""',
-        '    segment_list = []',
-        '    for segment in segments:',
-        '        transcript += segment.text + " "',
-        '        segment_list.append({',
-        '            "id": segment.id,',
-        '            "start": segment.start,',
-        '            "end": segment.end,',
-        '            "text": segment.text,',
-        '            "speaker": "Speaker 0"',
-        '        })',
-        '    ',
-        '    result = {',
-        '        "transcript": transcript.strip(),',
-        '        "segments": segment_list,',
-        '        "duration": info.duration,',
-        '        "language": info.language,',
-        '        "language_probability": float(info.language_probability) if hasattr(info, "language_probability") else 0.95',
-        '    }',
-        '    print(json.dumps(result))',
-        'except Exception as e:',
-        '    import traceback',
-        '    print(json.dumps({"error": str(e)}), file=sys.stderr)',
-        '    sys.exit(1)',
-      ].join('\n');
+    const formData = new FormData();
+    formData.append("audio", fs.createReadStream(audioPath) as any);
+    formData.append("language", language);
 
-      const scriptPath = path.join(os.tmpdir(), `whisper_${Date.now()}.py`);
-      fs.writeFileSync(scriptPath, pythonCode);
-
-      const startTime = Date.now();
-      
-      // Use venv Python on Windows, fallback to 'python' on other systems
-      const isWindows = process.platform === 'win32';
-      const venvPythonPath = path.join(process.cwd(), 'venv', 'Scripts', 'python.exe');
-      const pythonCmd = isWindows && fs.existsSync(venvPythonPath) ? venvPythonPath : 'python';
-      
-      console.log(`[Transcriber] Using Python: ${pythonCmd}`);
-      
-      const python = spawn(pythonCmd, [scriptPath], { 
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 30 * 60 * 1000, // 30 minute timeout
+    const startTime = Date.now();
+    try {
+      const response = await fetch("http://127.0.0.1:8000/transcribe", {
+        method: "POST",
+        body: formData as any,
       });
 
-      let stdout = '';
-      let stderr = '';
-      let processCompleted = false;
+      if (!response.ok) {
+        throw new Error(`Whisper API failed with status ${response.status}: ${await response.text()}`);
+      }
 
-      python.stdout?.on('data', (data) => { 
-        stdout += data.toString();
-        console.log(`[Transcriber] Python stdout: ${data.toString().substring(0, 100)}`);
-      });
-      
-      python.stderr?.on('data', (data) => { 
-        stderr += data.toString();
-        console.log(`[Transcriber] Python stderr: ${data.toString().substring(0, 100)}`);
-      });
+      const result = await response.json() as any;
+      if (result.error) {
+        throw new Error(result.error);
+      }
 
-      python.on('close', (code) => {
-        processCompleted = true;
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`[Transcriber] Python process exited with code: ${code}`);
-        
-        if (fs.existsSync(scriptPath)) { fs.unlinkSync(scriptPath); }
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`[Transcriber] FastAPI transcription complete in ${elapsed}s`);
 
-        if (code !== 0) {
-          reject(new Error(`Whisper failed (code ${code}): ${stderr}`));
-          return;
-        }
+      const segments: ISpeakerSegment[] = (result.segments || []).map((seg: any) => ({
+        start: seg.start,
+        end: seg.end,
+        speaker: seg.speaker,
+        text: seg.text,
+      }));
 
-        try {
-          const result = JSON.parse(stdout);
-          if (result.error) { reject(new Error(result.error)); return; }
+      return {
+        transcript: result.transcript,
+        segments,
+        duration: result.duration || 0,
+        confidence: result.language_probability || 0.95,
+        language: result.language || language,
+      };
 
-          console.log(`[Transcriber] Local transcription complete in ${elapsed}s`);
-          const segments: ISpeakerSegment[] = (result.segments || []).map((seg: any) => ({
-            start: seg.start,
-            end: seg.end,
-            speaker: seg.speaker,
-            text: seg.text,
-          }));
-
-          resolve({
-            transcript: result.transcript,
-            segments,
-            duration: result.duration,
-            confidence: result.language_probability || 0.95,
-            language: result.language,
-          });
-        } catch (e) {
-          reject(new Error(`Parse error: ${(e as Error).message}`));
-        }
-      });
-
-      python.on('error', (err) => {
-        processCompleted = true;
-        console.error(`[Transcriber] Python spawn error: ${err.message}`);
-        reject(new Error(`Failed to spawn Whisper: ${err.message}`));
-      });
-    });
+    } catch (e: any) {
+      console.error(`[Transcriber] FastAPI error: ${e.message}`);
+      throw new Error(`Failed to call Whisper API: ${e.message}`);
+    }
   }
 
   /**

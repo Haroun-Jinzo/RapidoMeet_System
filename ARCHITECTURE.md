@@ -1,335 +1,56 @@
 # Architecture & Pipeline Visual
 
-## 🏗️ System Architecture
+## ??? System Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      CLIENT APPLICATION                         │
-│                    (Web/Mobile/Desktop)                          │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ POST /upload-meeting
-                             │ { audio, title, type, language }
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   EXPRESS SERVER (index.ts)                      │
-│  Middleware: auth, cors, audio parsing, session creation        │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-                    ┌────────▼────────┐
-                    │  REQUEST BODY   │
-                    │   (Audio File)  │
-                    └────────┬────────┘
-                             │
-            ┌────────────────┼────────────────┐
-            │                │                │
-            ▼                ▼                ▼
-      ┌──────────┐   ┌──────────────┐   ┌─────────────┐
-      │Transcriber    │SkillRegistry  │ Skill Files │
-      │(Groq)     │   │(Auto-detect)  │ (MD files)  │
-      └──────────┘   └──────────────┘ └─────────────┘
-            │         Detects: tech,
-            │         commercial,
-            │         onboarding,
-            │         retro, general
-            │
-      ┌─────▼──────────────────────────────┐
-      │   TRANSCRIPT + SKILL CONTENT       │
-      │   "nous avons décidé de..."        │
-      │   + tech.md (extraction rules)     │
-      └─────┬──────────────────────────────┘
-            │
-            ▼
-      ┌──────────────────┐
-      │ TaskExtractor    │
-      │ (Gemini API)     │
-      │                  │
-      │ Extracts:        │
-      │ - Tasks          │
-      │ - Decisions      │
-      │ - Action Items   │
-      └─────┬────────────┘
-            │
-      ┌─────▼──────────────────────────┐
-      │ EXTRACTION RESULT              │
-      │ {                              │
-      │   tasks: [...],                │
-      │   decisions: [...],            │
-      │   actionItems: [...]           │
-      │ }                              │
-      └─────┬──────────────────────────┘
-            │
-            ▼
-      ┌──────────────┐
-      │ IntentRouter │
-      │ (Decides)    │
-      │              │
-      │ Match to:    │
-      │ - Jira       │
-      │ - Google     │
-      │ - Gmail      │
-      │ - n8n, etc   │
-      └─────┬────────┘
-            │
-      ┌─────▼──────────────────────────┐
-      │ ACTIONS                        │
-      │ [                              │
-      │  { tool: jira, action: ... }, │
-      │  { tool: gmail, action: ... }  │
-      │ ]                              │
-      └─────┬──────────────────────────┘
-            │
-            ▼
-      ┌────────────────┐
-      │ MCPDispatcher  │
-      │ (Execute)      │
-      │                │
-      │ Uses: OpenClaw │
-      │ MCP Server     │
-      └─────┬──────────┘
-            │
-      ┌─────▼──────────────────────────┐
-      │ RESULTS                        │
-      │ [                              │
-      │  { tool: jira, success: ... }, │
-      │  { tool: gmail, success: ... } │
-      │ ]                              │
-      └─────┬──────────────────────────┘
-            │
-      ┌─────┴───────┐
-      ▼             ▼
-   ┌─────────┐  ┌──────────┐
-   │Formatter │  │Notifier  │
-   │          │  │          │
-   └─────┬────┘  └─────┬────┘
-         │             │
-    ┌────▼────────┐    ├─→ Telegram
-    │REPORT       │    ├─→ Discord
-    │             │    ├─→ Email
-    │Formatted    │    └─→ Slack
-    │Summary      │
-    └────┬────────┘
-         │
-    ┌────▼─────────────────────────┐
-    │ RESPONSE TO CLIENT            │
-    │ {                             │
-    │   status: "success",          │
-    │   transcript,                 │
-    │   extraction,                 │
-    │   actions,                    │
-    │   results,                    │
-    │   report,                     │
-    │   notifications_sent          │
-    │ }                             │
-    └───────────────────────────────┘
-```
+1. **Client Application** sends audio + metadata to **RapidoMeet Express Server**.
+2. **RapidoMeet** processes audio via Groq (Transcription) -> Gemini (Extraction/Routing).
+3. If tasks require confirmation, the session enters \waiting_confirmation\, the frontend prompts the user, and actions are confirmed by calling \POST /sessions/:id/actions/:actionId/confirm\.
+4. Once ready, **RapidoMeet** sends a websocket message to the **OpenClaw Orchestrator**.
+5. **OpenClaw** processes and executes workflows (Slack, Notion, Calendar).
+6. When OpenClaw needs internal credentials (e.g. Google Access Token), it invokes RapidoMeet internal endpoints (like \/internal/google/access-token\) using an internal shared secret.
 
-## 📦 Module Dependencies
+### Diagram
 
-```
-Client
-  ↓
-index.ts (Express server)
-  ├── transcribe.ts (Groq API)
-  ├── skill-loader.ts (File system)
-  ├── extract.ts (Gemini API)
-  ├── router.ts (Logic)
-  ├── dispatcher.ts (OpenClaw MCP)
-  ├── formatter.ts (Templates)
-  ├── notifier.ts (Telegram, Discord, Email)
-  ├── memory.ts (PostgreSQL)
-  ├── session.ts (Session management)
-  └── resilience/CircuitBreaker.ts (Reliability)
-```
+\\\mermaid
+sequenceDiagram
+    participant User
+    participant Express as RapidoMeet Express Server
+    participant Supabase as Supabase (Vault / DB)
+    participant OpenClaw as OpenClaw (AWS Orchestrator)
+    
+    User->>Express: POST /upload-meeting (JWT Auth)
+    Express->>Express: Transcribe (Groq) & Extract (Gemini)
+    Express->Supabase: Save Session State
+    
+    alt Needs Confirmation
+        Express-->>User: returns { status: 'awaiting_confirmation' }
+        Express->>OpenClaw: WS message 'meeting.awaiting_confirmation'
+        User->>Express: POST /sessions/:id/actions/:id/confirm
+        Express->>OpenClaw: WS message 'meeting.action_confirmed'
+    else Auto-Execute
+        Express-->>User: returns { status: 'complete' }
+    end
+    
+    Express->>OpenClaw: WS message 'meeting.completed' (Consolidated Report)
+    
+    note over OpenClaw: OpenClaw execution phase
+    OpenClaw->>Express: POST /internal/google/access-token
+    Express->>Supabase: Fetch refresh_token from Vault
+    Express-->>OpenClaw: Google access_token
+    OpenClaw->>Google: create calendar event
+    OpenClaw->>User: Notify via Telegram
+\\\
 
-## 🔄 Data Flow Through Pipeline
+## ??? Security Boundaries
+- **Auth**: Frontend passes a real Supabase JWT. Express verifies this via \jsonwebtoken\ + \SUPABASE_JWT_SECRET\.
+- **Connections Store**: The Express server uses the \SUPABASE_SERVICE_ROLE_KEY\ to fetch encrypted tokens from Supabase Vault or metadata. These secrets are NEVER logged or exposed to the public API.
+- **OpenClaw Internal Endpoints**: OpenClaw fetches minted proxies (e.g., short lived Access tokens, Telegram Proxies) via Express the \/internal/*\ routes, protected by \INTERNAL_OPENCLAW_SECRET\.
+- **OpenClaw WS**: Express connects to OpenClaw Websocket server using \OPENCLAW_WS_TOKEN\.
 
-### 1️⃣ Audio Input
-```
-User uploads: 30-second Zoom recording (French)
-              ├── Format: MP3/WAV/M4A
-              ├── Size: 50MB max
-              └── Language: auto-detect or specified
-```
-
-### 2️⃣ Transcription
-```
-Input:  Audio buffer + language code
-         ↓ [Groq Whisper API]
-Output: {
-  transcript: "Bonjour, aujourd'hui nous parlons de...",
-  segments: [...],  // With timestamps
-  duration: 284,    // Seconds
-  confidence: 0.95
-}
-```
-
-### 3️⃣ Skill Detection
-```
-Input:  Transcript: "Nous avons décidé de migrer vers TypeScript"
-         ↓ [Keyword matching + ML hints]
-Output: Skill type = "tech"
-        Load: src/skills/tech.md
-```
-
-### 4️⃣ NLP Extraction
-```
-Input:  Transcript + tech.md extraction rules
-         ↓ [Gemini API with prompt engineering]
-Output: {
-  tasks: [
-    { title: "Migrate to TypeScript", assignee: "Alice", deadline: "2026-04-20" },
-    ...
-  ],
-  decisions: [
-    { decision: "Use TypeScript", owner: "Bob", impact: "2-week effort" }
-  ]
-}
-```
-
-### 5️⃣ Intent Routing
-```
-Input:  Extracted tasks + meeting type (tech)
-         ↓ [Rules-based routing]
-Output: Actions = [
-  { tool: "jira", action: "create_issue", params: {...} },
-  { tool: "google_docs", action: "append_summary", params: {...} },
-  { tool: "email", action: "send", params: {...} }
-]
-```
-
-### 6️⃣ Dispatch & Execute
-```
-Input:  Actions array
-         ↓ [OpenClaw MCP Server with circuit breaker]
-Output: Results = [
-  { tool: "jira", success: true, output: "Issue PROJ-1234 created" },
-  { tool: "google_docs", success: true, output: "Document updated" },
-  { tool: "email", success: true, output: "Sent to 3 recipients" }
-]
-```
-
-### 7️⃣ Report & Notify
-```
-Input:  All previous outputs
-         ↓ [Template-based formatting]
-Output: {
-  report_text: "📋 **Meeting: Tech Planning**\n\n✅ 2 tasks extracted\n...",
-  notifications: ["telegram", "email"]
-}
-
-Telegram: "📋 Tech Planning Summary\n✅ 2 tasks created\n⚡ Actions dispatched"
-Email:    [formatted HTML email]
-```
-
-## 🎯 Meeting Type Specialization
-
-```
-Meeting Type    | Skill File        | Key Extractions
-─────────────────────────────────────────────────────
-tech            | tech.md           | Tasks, bugs, technical decisions
-commercial      | commercial.md     | Deals, revenue targets, partnerships
-onboarding      | onboarding.md     | Equipment, training, documents
-retro           | retro.md          | What went well, improvements, action items
-general         | general.md        | Safe default extraction
-```
-
-## 🛡️ Reliability Features
-
-```
-┌─────────────────────────┐
-│  Circuit Breaker        │
-│  (for Groq + Toolkit)   │
-│                         │
-│  Protects Against:      │
-│  ✓ API timeouts        │
-│  ✓ Rate limiting       │
-│  ✓ Cascading failures  │
-│  ✓ Retry storms        │
-└─────────────────────────┘
-      │
-      ├─→ Auto-reset after 60s
-      ├─→ Fast-fail with clear errors
-      └─→ Prevents system overload
-```
-
-## 📊 Processing Timeline
-
-For a typical 5-minute meeting:
-
-```
-Audio Upload:          0-3s
-  ├─ File validation: ~100ms
-  ├─ Groq Whisper: ~2-3s (depends on audio length)
-  └─ Transcription cleanup: ~50ms
-
-Skill Detection:       50-200ms
-  └─ Pattern matching on transcript
-
-NLP Extraction:        1-2s
-  └─ Gemini API call (streaming)
-
-Intent Routing:        100-300ms
-  └─ Rule matching + action generation
-
-Action Dispatch:       500-2000ms
-  ├─ Jira: 300-500ms per issue
-  ├─ Google Docs: 200-400ms
-  ├─ Email: 100-200ms
-  └─ n8n webhooks: 200-500ms
-
-Report & Notify:       500-1000ms
-  ├─ Format: 50-100ms
-  └─ Send Telegram/Email: 400-900ms
-
-─────────────────────────────
-TOTAL:                 3-7 seconds
-```
-
-## 🗄️ Database Schema (PostgreSQL)
-
-```
-sessions
-├── id (uuid)
-├── user_id
-├── meeting_title
-├── meeting_type
-├── transcript
-├── extraction (jsonb)
-├── actions (jsonb)
-├── results (jsonb)
-├── created_at
-
-redis (caching)
-├── transcript_cache:{session_id}
-├── extraction_cache:{session_id}
-└── skill_cache (loaded on startup)
-```
-
-## 🚀 Scaling Considerations
-
-```
-Current:  Single server, sync processing
-        ├─ Good for: <100 meetings/day
-        └─ Max latency: ~7s per meeting
-
-Scale 1:  Add Redis queue
-        ├─ Async task processing
-        ├─ Good for: 100-1000 meetings/day
-        └─ Max latency: ~100ms (user-facing)
-
-Scale 2:  Distributed workers
-        ├─ Transcription service (separate)
-        ├─ Extraction service (separate)
-        ├─ Action dispatch service (separate)
-        ├─ Good for: 1000+ meetings/day
-        └─ May need: Kafka, microservices
-```
-
----
-
-This architecture is designed to be:
-- **Reliable** — Circuit breakers, error handling, retry logic
-- **Extensible** — New models (skills) in `src/skills/`
-- **Observable** — Detailed logging at each step
-- **Testable** — Each component can be tested independently
-
+## ?? Key Files
+- \src/index.ts\: Entry point, defines main endpoints (\/upload-meeting\, \/sessions/:id\, confirmations).
+- \src/openclaw/OpenClawClient.ts\: The dedicated WS client managing connection to BraindCode AWS.
+- \src/internal/tokenBroker.ts\: API for OpenClaw to safely resolve user secrets.
+- \src/integrations/ConnectionsStore.ts\: Service wrapper resolving OAuth states via Supabase.
+- \src/middleware/auth.ts\: JWT Validation.
+- \src/config/services.ts\: Defines whether tools are critical or non-critical.

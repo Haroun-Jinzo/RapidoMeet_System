@@ -36,22 +36,19 @@ export const WEBHOOK_PATHS: Record<string, string> = {
  * These tools modify sensitive data and should never run automatically
  */
 export const ALWAYS_CRITICAL_TOOLS = new Set([
-  'create_crm_task',
-  'update_crm_contact',
-  'add_prospect',
-  'create_calendar_event',
+  'crm.create_contact',
+  'crm.create_opportunity',
+  'calendar.create_event',
+  'n8n.trigger_workflow', // depends on workflow, defaulting to critical
 ]);
 
-/** Safe tools that NEVER require confirmation and can run automatically
+/** Safe tools that NEVER require confirmation and can run automatically        
  * These tools are read-only or informational with no side effects
  */
 export const NEVER_CRITICAL_TOOLS = new Set([
-  'send_email',
-  'log_event',
-]);
-
-// ============================================================================
-// External API Configuration
+  'email.send_recap',
+  'crm.log_activity',
+  'db.save_task',]);
 // ============================================================================
 
 /** Groq API configuration for speech-to-text transcription */

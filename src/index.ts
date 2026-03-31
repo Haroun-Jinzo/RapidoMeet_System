@@ -21,8 +21,9 @@ import { sessionManager } from "./session";
 import { skillRegistry } from "./skill-loader";
 import { memoryManager } from "./memory";
 import { reportFormatter } from "./formatter";
-import { NotificationChannel } from "./interfaces";
-import { notifier } from "./notifier";
+import { requireAuth } from "./middleware/auth";
+import { internalRouter } from "./internal/tokenBroker";
+import { openclawClient } from "./openclaw/OpenClawClient";
 
 // ── Supabase Setup ────────────────────────────────────────────────────────
 // Initialize Supabase client for persistent audio storage
@@ -81,12 +82,8 @@ async function uploadAudioToSupabase(
   }
 }
 
-// Auth middleware (simple version for now)
-const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
-  // TODO: Implement proper authentication
-  (req as any).user = { id: "user-" + Date.now() };
-  next();
-};
+// Auth middleware uses Supabase JWT
+const authMiddleware = requireAuth;
 
 // ── Express Setup ──────────────────────────────────────────────────────────
 
@@ -97,6 +94,9 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
+
+// Internal routes (OpenClaw -> RapidoMeet via shared secret)
+app.use('/internal', internalRouter);
 
 // Custom file handling - expects audio data in req.body
 const handleAudioUpload = (req: Request & { file?: { buffer: Buffer; mimetype: string } }, res: Response, next: NextFunction) => {
@@ -197,6 +197,20 @@ app.post(
           `${pendingCritical.length} action(s) awaiting confirmation`
         );
 
+        // Notify OpenClaw about awaiting confirmation
+        try {
+          await openclawClient.sendReport("meeting.awaiting_confirmation", {
+            session_id: session.id,
+            user_id: session.userId,
+            transcript_summary: extraction.summary,
+            extraction_json: extraction,
+            proposed_actions: actions,
+            pending_critical: pendingCritical,
+          });
+        } catch(err) { 
+          console.warn("[Pipeline] OpenClaw WS notify failed:", err); 
+        }
+
         return res.json({
           session_id:       session.id,
           status:           "awaiting_confirmation",
@@ -212,29 +226,23 @@ app.post(
         });
       }
 
-      // ── Step 5: Dispatch non-critical actions ────────────────────────────
-      console.log(`[Pipeline] ${session.id} — Step 5: Dispatching`);
-      const results = await mcpDispatcher.executeAll(actions, session.id);
+      // ── Step 5: Delegate Executions to OpenClaw ────────────────────────────
+      console.log(`[Pipeline] ${session.id} — Step 5: OpenClaw Delegation`);
 
-      // Step 6: Format the report for all channels
-      const report = reportFormatter.format(session, results);
-
-      // Step 7: Send notifications (non-fatal if fails)
-      let notifications: any[] = [];
       try {
-        const channels: NotificationChannel[] = ["telegram"];
-        // Passing 'session' directly as the 4th argument so OpenClaw Gateway 
-        // receives the raw metadata JSON instead of just strings
-        notifications = await notifier.notifyAll(
-          report,
-          channels,
-          session.id,
-          session // <--- Raw JSON payload passed here
-        );
-      } catch (notifyErr) {
-        console.warn("[Pipeline] Notification failed (non-fatal):", (notifyErr as Error).message);
-        notifications = [];
+        await openclawClient.sendReport("meeting.completed", {
+          session_id: session.id,
+          user_id: session.userId,
+          transcript_summary: extraction.summary,
+          extraction_json: extraction,
+          proposed_actions: actions,
+        });
+      } catch (err) {
+        console.warn("[Pipeline] Failed to notify OpenClaw WS:", err);
       }
+      
+      const results: any[] = [];
+      let notifications: any[] = []; // handled by OpenClaw now
 
       // Save completed meeting to PostgreSQL (non-fatal if fails)
       try {
@@ -281,10 +289,7 @@ app.post(
         actions,
         results,
         notifications_sent: notifications,
-        report: {
-          telegram: report.telegram,
-          whatsapp: report.whatsapp,
-        },
+        
         skill_used:  skill.name,
         audio_storage: audioStoragePath ? { path: audioStoragePath, bucket: AUDIO_BUCKET } : null,
       });
@@ -315,185 +320,64 @@ app.post(
   }
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /confirm-action
-// Called when the user approves a critical action via the UI or Telegram.
-// Resumes the pipeline for that specific action.
-// ─────────────────────────────────────────────────────────────────────────────
-
-app.post("/confirm-action", authMiddleware, async (req: Request, res: Response) => {
-  const { session_id, action_id, decision } = req.body;
-  // decision must be "confirm", "refuse", or "timeout"
-
-  if (!session_id || !action_id || !decision) {
-    return res.status(400).json({
-      error: "session_id, action_id, and decision are required"
-    });
-  }
-
-  if (!["confirm", "refuse", "timeout"].includes(decision)) {
-    return res.status(400).json({
-      error: "decision must be 'confirm', 'refuse', or 'timeout'"
-    });
-  }
-
-  // Load the session from Redis
-  const session = await sessionManager.load(session_id);
-  if (!session) {
-    return res.status(404).json({
-      error: `Session ${session_id} not found or expired`
-    });
-  }
-
-  // Find the specific action
-  const action = session.actions?.find(a => a.id === action_id);
-  if (!action) {
-    return res.status(404).json({
-      error: `Action ${action_id} not found in session ${session_id}`
-    });
-  }
-
-  // Update action status based on user decision
-  if (decision === "confirm") {
-    action.status = "confirmed";
-    console.log(`[Gate] Action ${action_id} CONFIRMED by user`);
-
-    // Execute the now-confirmed action
-    const result = await mcpDispatcher.resume(action, session_id);
-
-    // Check if there are still other pending critical actions
-    const stillPending = session.actions?.filter(
-      a => a.requiresConfirmation && a.status === "pending" && a.id !== action_id
-    ) || [];
-
-    if (stillPending.length === 0) {
-      // All critical actions resolved — pipeline complete
-      session.status = "complete";
-    }
-
-    await sessionManager.save(session);
-
-    return res.json({
-      action_id,
-      decision:      "confirmed",
-      result,
-      still_pending: stillPending.length,
-    });
-
-  } else {
-    // refused or timeout
-    action.status = decision === "refuse" ? "refused" : "timeout";
-    console.log(`[Gate] Action ${action_id} ${action.status.toUpperCase()}`);
-
-    // Check remaining pending actions
-    const stillPending = session.actions?.filter(
-      a => a.requiresConfirmation && a.status === "pending" && a.id !== action_id
-    ) || [];
-
-    if (stillPending.length === 0) {
-      session.status = "complete";
-    }
-
-    await sessionManager.save(session);
-
-    return res.json({
-      action_id,
-      decision:      action.status,
-      still_pending: stillPending.length,
-      message:       `Action was ${action.status}. Pipeline continues without it.`,
-    });
-  }
+// ──────────────────────────────────────────────────────────────────────
+// POST /sessions/:id/actions/:actionId/confirm
+// Approves a critical action and notifies OpenClaw to continue.
+// ──────────────────────────────────────────────────────────────────────
+app.post('/sessions/:id/actions/:actionId/confirm', authMiddleware, async (req: Request, res: Response) => {
+  await handleActionDecision(req, res, 'confirm');
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /confirm-action
-// Called when the user approves a critical action via the UI or Telegram.
-// Resumes the pipeline for that specific action.
-// ─────────────────────────────────────────────────────────────────────────────
-
-app.post("/confirm-action", authMiddleware, async (req: Request, res: Response) => {
-  const { session_id, action_id, decision } = req.body;
-  // decision must be "confirm", "refuse", or "timeout"
-
-  if (!session_id || !action_id || !decision) {
-    return res.status(400).json({
-      error: "session_id, action_id, and decision are required"
-    });
-  }
-
-  if (!["confirm", "refuse", "timeout"].includes(decision)) {
-    return res.status(400).json({
-      error: "decision must be 'confirm', 'refuse', or 'timeout'"
-    });
-  }
-
-  // Load the session from Redis
-  const session = await sessionManager.load(session_id);
-  if (!session) {
-    return res.status(404).json({
-      error: `Session ${session_id} not found or expired`
-    });
-  }
-
-  // Find the specific action
-  const action = session.actions?.find(a => a.id === action_id);
-  if (!action) {
-    return res.status(404).json({
-      error: `Action ${action_id} not found in session ${session_id}`
-    });
-  }
-
-  // Update action status based on user decision
-  if (decision === "confirm") {
-    action.status = "confirmed";
-    console.log(`[Gate] Action ${action_id} CONFIRMED by user`);
-
-    // Execute the now-confirmed action
-    const result = await mcpDispatcher.resume(action, session_id);
-
-    // Check if there are still other pending critical actions
-    const stillPending = session.actions?.filter(
-      (a: any) => a.requiresConfirmation && a.status === "pending" && a.id !== action_id
-    ) || [];
-
-    if (stillPending.length === 0) {
-      // All critical actions resolved — pipeline complete
-      session.status = "complete";
-    }
-
-    await sessionManager.save(session);
-
-    return res.json({
-      action_id,
-      decision:      "confirmed",
-      result,
-      still_pending: stillPending.length,
-    });
-
-  } else {
-    // refused or timeout
-    action.status = decision === "refuse" ? "refused" : "timeout";
-    console.log(`[Gate] Action ${action_id} ${action.status.toUpperCase()}`);
-
-    // Check remaining pending actions
-    const stillPending = session.actions?.filter(
-      (a: any) => a.requiresConfirmation && a.status === "pending" && a.id !== action_id
-    ) || [];
-
-    if (stillPending.length === 0) {
-      session.status = "complete";
-    }
-
-    await sessionManager.save(session);
-
-    return res.json({
-      action_id,
-      decision:      action.status,
-      still_pending: stillPending.length,
-      message:       `Action was ${action.status}. Pipeline continues without it.`,
-    });
-  }
+// ──────────────────────────────────────────────────────────────────────
+// POST /sessions/:id/actions/:actionId/refuse
+// Refuses a critical action and notifies OpenClaw.
+// ──────────────────────────────────────────────────────────────────────
+app.post('/sessions/:id/actions/:actionId/refuse', authMiddleware, async (req: Request, res: Response) => {
+  await handleActionDecision(req, res, 'refuse');
 });
+
+async function handleActionDecision(req: Request, res: Response, decision: 'confirm' | 'refuse') {
+  const session_id = req.params.id as string; const action_id = req.params.actionId as string;
+  const session = await sessionManager.load(session_id);
+
+  if (!session) return res.status(404).json({ error: 'Session not found or expired' });
+
+  const action = session.actions?.find((a: any) => a.id === action_id);
+  if (!action) return res.status(404).json({ error: 'Action not found' });
+
+  action.status = decision === 'confirm' ? 'confirmed' : 'refused';
+  console.log(`[Gate] Action ${action_id} ${action.status.toUpperCase()}`);
+
+  const stillPending = session.actions?.filter(
+    (a: any) => a.requiresConfirmation && a.status === 'pending' && a.id !== action_id
+  ) || [];
+
+  if (stillPending.length === 0) {
+    session.status = 'complete';
+  }
+
+  await sessionManager.save(session);
+
+  // Notify OpenClaw
+  const wsType = decision === 'confirm' ? 'meeting.action_confirmed' : 'meeting.action_refused';
+  try {
+    await openclawClient.sendReport(wsType as any, {
+      session_id,
+      user_id: session.userId,
+      action_id,
+      decision,
+      still_pending: stillPending.length
+    });
+  } catch (e) {
+    console.error("OpenClaw WS emit failed:", e);
+  }
+
+  return res.json({
+    action_id,
+    decision: action.status,
+    still_pending: stillPending.length,
+  });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /session/:id
@@ -522,6 +406,9 @@ const server = app.listen(PORT, async () => {
   // Load all skills before starting
   await skillRegistry.loadAll();
   
+  // Connect to OpenClaw WS
+  openclawClient.connect();
+
   console.log(`[Server] RapidoMeet OpenClaw running on port ${PORT}`);
   console.log(`[Server] Environment: ${process.env.NODE_ENV || "development"}`);
 });
@@ -529,3 +416,4 @@ const server = app.listen(PORT, async () => {
 // Set timeout to 30 minutes (1800000 ms) to allow long audio processing
 server.setTimeout(1800000);
 console.log("[Server] Request timeout set to 30 minutes for large audio files");
+

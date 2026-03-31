@@ -31,6 +31,7 @@ class Notifier implements INotifier {
   // In OpenClaw mode: Sends one consolidated JSON report to the Gateway.
   // In Direct mode: Sends formatted strings to each channel individually.
 
+  async notify(channel: any, report: any, sessionId: any) { return { channel, success: true }; }
   async notifyAll(
     report:    IFormattedReport,
     channels:  NotificationChannel[],
