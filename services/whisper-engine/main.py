@@ -5,12 +5,13 @@ import os
 import tempfile
 import time
 
+#dont forget to add token authentication to this endpoint in production, or anyone can use your server to transcribe audio and run up your costs
 app = FastAPI()
 
 # Configuration (could be moved to env vars)
-MODEL_SIZE = "large-v3"
-DEVICE = "cuda" # or "cpu"
-COMPUTE_TYPE = "float16" # or "int8"
+MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base") # Changed from large-v3 to base for vastly improved CPU performance
+DEVICE = os.getenv("WHISPER_DEVICE", "cpu") # Changed from cuda to cpu due to missing cublas64_12.dll
+COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8") # float16 is usually for GPUs, int8 is faster/better optimized for CPU
 
 print(f"Loading WhisperModel {MODEL_SIZE} on {DEVICE}...")
 model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)

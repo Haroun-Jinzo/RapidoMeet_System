@@ -1,47 +1,75 @@
 import { createClient } from "@supabase/supabase-js";
 
-// Note: This operates using service_role, allowing access to Vault and bypassing RLS
+/**
+ * DB Schema assumption:
+ * table connections: (id, user_id, provider, status, metadata, vault_secret_id, created_at, updated_at)
+ * We use Supabase Vault to decrypt the secret securely.
+ */
+
 const supabaseService = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+export interface ConnectionRecord {
+  id: string;
+  user_id: string;
+  provider: string;
+  status: string;
+  metadata: any;
+  vault_secret_id: string;
+}
+
 export class ConnectionsStore {
   /**
-   * Retrieves a secret/refresh token from Supabase vault associated with a connection.
+   * Retrieves full connection info to verify ownership.
    */
-  async getConnectionSecret(userId: string, provider: string): Promise<string | null> {
+  async getConnection(connectionId: string): Promise<ConnectionRecord | null> {
     try {
-      // Typically, user connections reference a vault ID or are encrypted in the connections table
-      // Let's assume there's a user_connections table referencing a vault_secrets table
-      // Or simply a metadata field. Adjust as needed for the exact schema.
-
       const { data, error } = await supabaseService
-        .from('user_connections')
-        .select(`provider, secret`)
-        .eq('user_id', userId)
-        .eq('provider', provider)
+        .from('connections')
+        .select('*')
+        .eq('id', connectionId)
         .single();
         
       if (error || !data) {
-        console.warn(`Connection not found for user ${userId} / provider ${provider}`);
+        console.warn(`Connection not found: ${connectionId}`);
+        return null;
+      }
+      return data as ConnectionRecord;
+    } catch (err) {
+      console.error(`Error retrieving connection:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Retrieves a decrypted secret from Supabase Vault using the vault_secret_id.
+   */
+  async getVaultSecret(vaultSecretId: string): Promise<string | null> {
+    try {
+      const { data, error } = await supabaseService
+        .from('decrypted_secrets')
+        .select('decrypted_secret')
+        .eq('id', vaultSecretId)
+        .single();
+        
+      if (error || !data) {
+        console.warn(`Secret not found in vault or could not be decrypted: ${vaultSecretId}`);
         return null;
       }
 
-      // data.secret might be raw or a reference to a vault id.
-      // If it's a vault reference, we'd lookup from vault.decrypted_secrets
-      // Assume 'secret' here is decrypted or stored securely as per your Supabase config
-      return data.secret;
+      return data.decrypted_secret;
     } catch (err) {
-      console.error(`Error retrieving connection secret for ${provider}:`, err);
+      console.error(`Error retrieving secret from vault:`, err);
       return null;
     }
   }
 
   // Example helper to test connectivity / existence
-  async hasConnection(userId: string, provider: string): Promise<boolean> {
-      const secret = await this.getConnectionSecret(userId, provider);
-      return !!secret;
+  async hasConnection(connectionId: string): Promise<boolean> {
+      const conn = await this.getConnection(connectionId);
+      return !!conn && conn.status === 'active';
   }
 }
 

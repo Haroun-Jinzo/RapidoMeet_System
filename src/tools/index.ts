@@ -6,7 +6,7 @@ export const GEMINI_TOOLS: Tool[] = [
   {
     functionDeclarations: [
       {
-        name: "create_crm_contact",
+        name: "crm_create_contact",
         description:
           "Create a new contact in RapidoCRM after a meeting. " +
           "Use this when a prospect or client was mentioned in a meeting " +
@@ -44,7 +44,7 @@ export const GEMINI_TOOLS: Tool[] = [
       },
 
       {
-        name: "create_calendar_event",
+        name: "calendar_create_event",
         description:
           "Create a Google Calendar event for a follow-up meeting. " +
           "Use this when a next meeting or call was agreed upon.",
@@ -82,7 +82,7 @@ export const GEMINI_TOOLS: Tool[] = [
       },
 
       {
-        name: "send_meeting_recap",
+        name: "email_send_recap",
         description:
           "Send a formatted meeting recap via email and WhatsApp. " +
           "Use this after every meeting to distribute the summary and action items.",

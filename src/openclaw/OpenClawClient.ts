@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import crypto from "crypto";
 
 export interface OpenClawPayload {
   session_id: string;
@@ -15,6 +16,14 @@ export type OpenClawMessageType =
   | "meeting.action_confirmed"
   | "meeting.action_refused";
 
+interface Envelope {
+  message_id: string;
+  session_id: string;
+  event_type: OpenClawMessageType;
+  sent_at: string;
+  payload: OpenClawPayload;
+}
+
 export class OpenClawClient {
   private ws: WebSocket | null = null;
   private url: string;
@@ -22,6 +31,9 @@ export class OpenClawClient {
   private reconnectInterval = 3000;
   private maxReconnectAttempts = 10;
   private attempts = 0;
+  
+  // In-memory ACK tracking
+  private pendingAcks: Map<string, Envelope> = new Map();
 
   constructor() {
     this.url = process.env.OPENCLAW_WS_URL || "wss://openclaw-dev.braindcode.com";
@@ -39,7 +51,6 @@ export class OpenClawClient {
       return;
     }
 
-    // Connect with token header or query string based on external API requirements
     this.ws = new WebSocket(this.url, {
       headers: {
         "Authorization": `Bearer ${this.token}`,
@@ -49,10 +60,21 @@ export class OpenClawClient {
     this.ws.on("open", () => {
       console.log(`[OpenClaw] Connected to ${this.url}`);
       this.attempts = 0; // reset
+      this.flushPendingMessages();
     });
 
     this.ws.on("message", (data) => {
-      console.log("[OpenClaw] Received message:", data.toString());
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === "ack" && msg.message_id) {
+          console.log(`[OpenClaw] Received ACK for message: ${msg.message_id}`);
+          this.pendingAcks.delete(msg.message_id);
+        } else {
+          console.log("[OpenClaw] Received message:", msg);
+        }
+      } catch (err) {
+        console.log("[OpenClaw] Received non-JSON message:", data.toString());
+      }
     });
 
     this.ws.on("close", () => {
@@ -73,32 +95,61 @@ export class OpenClawClient {
       console.log(`[OpenClaw] Reconnecting in ${this.reconnectInterval}ms (Attempt ${this.attempts})`);
       setTimeout(() => this.connect(), this.reconnectInterval);
     } else {
-      console.error("[OpenClaw] Max reconnect attempts reached.");
+      console.error("[OpenClaw] Max reconnect attempts reached. Pending messages may be lost or should trigger HTTP webhook fallback.");
+      // this.triggerHttpFallback();
     }
   }
 
-  public async sendReport(type: OpenClawMessageType, payload: OpenClawPayload): Promise<void> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.warn("[OpenClaw] Cannot send message, WebSocket is not connected or open");
-      return;
+  private async flushPendingMessages() {
+    if (this.pendingAcks.size === 0) return;
+    console.log(`[OpenClaw] Flushing ${this.pendingAcks.size} pending messages...`);
+    for (const [msgId, envelope] of Array.from(this.pendingAcks.entries())) {
+      try {
+        await this._sendRaw(envelope);
+      } catch (e) {
+        console.warn(`[OpenClaw] Failed to flush message ${msgId}`);
+      }
     }
+  }
 
-    const message = JSON.stringify({
-      type,
-      payload,
-      timestamp: new Date().toISOString()
-    });
-
+  private _sendRaw(envelope: Envelope): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.ws!.send(message, (err) => {
-        if (err) {
-          console.error(`[OpenClaw] Failed to send message of type ${type}:`, err);
-          return reject(err);
-        }
-        console.log(`[OpenClaw] Sent message of type ${type} for session ${payload.session_id}`);
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        return reject(new Error("WebSocket not open"));
+      }
+      const message = JSON.stringify(envelope);
+      this.ws.send(message, (err) => {
+        if (err) return reject(err);
         resolve();
       });
     });
+  }
+
+  public async sendReport(type: OpenClawMessageType, payload: OpenClawPayload): Promise<void> {
+    const envelope: Envelope = {
+      message_id: crypto.randomUUID(),
+      session_id: payload.session_id,
+      event_type: type,
+      sent_at: new Date().toISOString(),
+      payload
+    };
+
+    // Require ACK mostly for completed / action_confirmed
+    if (type === "meeting.completed" || type === "meeting.action_confirmed") {
+        this.pendingAcks.set(envelope.message_id, envelope);
+    }
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn(`[OpenClaw] WS not open. Queued message ${envelope.message_id} of type ${type}`);
+      return; // Will be flushed on reconnect
+    }
+
+    try {
+      await this._sendRaw(envelope);
+      console.log(`[OpenClaw] Sent message ${envelope.message_id} of type ${type} for session ${payload.session_id}`);
+    } catch (err) {
+      console.error(`[OpenClaw] Failed to send message of type ${type}:`, err);
+    }
   }
 }
 

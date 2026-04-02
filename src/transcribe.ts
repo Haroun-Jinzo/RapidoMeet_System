@@ -152,14 +152,6 @@ class Transcriber implements ITranscriber {
       `type: ${mimeType}, lang: ${language}`
     );
 
-    // Validate file size against Groq's hard limit
-    if (audioBuffer.length > GROQ_CONFIG.maxFileSize) {
-      throw new Error(
-        `Audio file too large for Groq: ${fileSizeMB}MB. ` +
-        `Maximum is ${GROQ_CONFIG.maxFileSize / 1024 / 1024}MB. Using local Whisper instead.`
-      );
-    }
-
     const ext = this.getExtension(mimeType);
     const tmpPath = path.join(os.tmpdir(), `rapidomeet_${Date.now()}${ext}`);
 
@@ -167,9 +159,17 @@ class Transcriber implements ITranscriber {
       fs.writeFileSync(tmpPath, audioBuffer);
 
       // ✅ Route to appropriate transcription engine based on file size
-      if (LOCAL_WHISPER_CONFIG.enabled && audioBuffer.length > LOCAL_WHISPER_CONFIG.sizeLimitForLocal) {
-        console.log(`[Transcriber] File size (${fileSizeMB}MB) exceeds threshold, using local faster-whisper`);
+      if (LOCAL_WHISPER_CONFIG.enabled && (audioBuffer.length > LOCAL_WHISPER_CONFIG.sizeLimitForLocal || audioBuffer.length > GROQ_CONFIG.maxFileSize)) {
+        console.log(`[Transcriber] File size (${fileSizeMB}MB) triggers local fallback, using local faster-whisper`);
         return await this.transcribeWithLocalWhisper(tmpPath, language);
+      }
+
+      // Validate file size against Groq's hard limit if local whisper didn't catch it
+      if (audioBuffer.length > GROQ_CONFIG.maxFileSize) {
+        throw new Error(
+          `Audio file too large for Groq: ${fileSizeMB}MB. ` +
+          `Maximum is ${Math.round(GROQ_CONFIG.maxFileSize / 1024 / 1024)}MB. Local Whisper fallback is disabled.`
+        );
       }
 
       // Use Groq API for smaller files

@@ -33,13 +33,13 @@ import {
 
 const ActionDecisionSchema = z.object({
   tool: z.enum([
-    "crm.create_contact",
-    "crm.create_opportunity",
-    "crm.log_activity",
-    "calendar.create_event",
-    "email.send_recap",
-    "db.save_task",
-    "n8n.trigger_workflow",
+    "crm_create_contact",
+    "crm_create_opportunity",
+    "crm_log_activity",
+    "calendar_create_event",
+    "email_send_recap",
+    "db_save_task",
+    "n8n_trigger_workflow",
   ] as const),
   params:               z.record(z.string(), z.unknown()),
   requiresConfirmation: z.boolean(),
@@ -170,32 +170,32 @@ Your job is to analyse meeting extraction data and decide which MCP (Model Conte
 
 | Tool | What it does | Risk level |
 |------|-------------|------------|
-| crm.create_contact | Creates a new permanent contact in RapidoCRM | HIGH — irreversible |
-| crm.create_opportunity | Creates a sales opportunity in RapidoCRM | HIGH — irreversible |
-| crm.log_activity | Logs a note on an existing CRM contact | LOW — append only |
-| calendar.create_event | Creates a Google Calendar event | LOW — easily deleted |
-| email.send_recap | Sends the meeting recap email to participants | LOW — informational |
-| db.save_task | Saves an action item to the task database | LOW — easily deleted |
-| n8n.trigger_workflow | Triggers a custom N8N automation workflow | MEDIUM — depends on workflow |
+| crm_create_contact | Creates a new permanent contact in RapidoCRM | HIGH — irreversible |
+| crm_create_opportunity | Creates a sales opportunity in RapidoCRM | HIGH — irreversible |
+| crm_log_activity | Logs a note on an existing CRM contact | LOW — append only |
+| calendar_create_event | Creates a Google Calendar event | LOW — easily deleted |
+| email_send_recap | Sends the meeting recap email to participants | LOW — informational |
+| db_save_task | Saves an action item to the task database | LOW — easily deleted |
+| n8n_trigger_workflow | Triggers a custom N8N automation workflow | MEDIUM — depends on workflow |
 
 ## Confirmation Gate Rules
 
 requiresConfirmation MUST be true for ALWAYS_CRITICAL tools:
-- crm.create_contact (permanent CRM record — irreversible)
-- crm.create_opportunity (financial pipeline entry — irreversible)
+- crm_create_contact (permanent CRM record — irreversible)
+- crm_create_opportunity (financial pipeline entry — irreversible)
 
 requiresConfirmation MUST be false for NEVER_CRITICAL tools:
-- email.send_recap (always send automatically)
-- db.save_task (always save automatically)
-- crm.log_activity (append only, safe)
+- email_send_recap (always send automatically)
+- db_save_task (always save automatically)
+- crm_log_activity (append only, safe)
 
 ## Decision Rules
 
-1. Create one db.save_task for each task in extraction
-2. Create one crm.create_contact for each new prospect
-3. Create calendar.create_event if follow-up meeting mentioned
-4. Always create email.send_recap at end (last action)
-5. Only create crm.log_activity if CRM contact exists
+1. Create one db_save_task for each task in extraction
+2. Create one crm_create_contact for each new prospect
+3. Create calendar_create_event if follow-up meeting mentioned
+4. Always create email_send_recap at end (last action)
+5. Only create crm_log_activity if CRM contact exists
 6. Don't create actions for vague/uncertain information
 7. Keep params concise — only use explicit information
 
@@ -332,13 +332,13 @@ Return ONLY the JSON object.
 
     // Sort by tool priority
     const toolOrder: MCPTool[] = [
-      "crm.create_contact",
-      "crm.create_opportunity",
-      "calendar.create_event",
-      "crm.log_activity",
-      "n8n.trigger_workflow",
-      "db.save_task",
-      "email.send_recap",  // Always last
+      "crm_create_contact",
+      "crm_create_opportunity",
+      "calendar_create_event",
+      "crm_log_activity",
+      "n8n_trigger_workflow",
+      "db_save_task",
+      "email_send_recap",  // Always last
     ];
 
     return actions.sort((a, b) => {

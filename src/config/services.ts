@@ -36,25 +36,25 @@ export const WEBHOOK_PATHS: Record<string, string> = {
  * These tools modify sensitive data and should never run automatically
  */
 export const ALWAYS_CRITICAL_TOOLS = new Set([
-  'crm.create_contact',
-  'crm.create_opportunity',
-  'calendar.create_event',
-  'n8n.trigger_workflow', // depends on workflow, defaulting to critical
+  'crm_create_contact',
+  'crm_create_opportunity',
+  'calendar_create_event',
+  'n8n_trigger_workflow', // depends on workflow, defaulting to critical
 ]);
 
 /** Safe tools that NEVER require confirmation and can run automatically        
  * These tools are read-only or informational with no side effects
  */
 export const NEVER_CRITICAL_TOOLS = new Set([
-  'email.send_recap',
-  'crm.log_activity',
-  'db.save_task',]);
+  'email_send_recap',
+  'crm_log_activity',
+  'db_save_task',]);
 // ============================================================================
 
 /** Groq API configuration for speech-to-text transcription */
 export const GROQ_CONFIG = {
   model: 'whisper-large-v3',
-  maxFileSize: 25 * 1024 * 1024, // 25MB - Groq's limit
+  maxFileSize: 5 * 1024 * 1024, // 25MB - Groq's limit
 };
 
 /** Local Whisper configuration (faster-whisper) */

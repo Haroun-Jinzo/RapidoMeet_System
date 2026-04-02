@@ -19,13 +19,13 @@ import {
 
 // ── Mock responses for testing without actual MCP servers running ────────────
 const MOCK_RESPONSES: Record<MCPTool, Record<string, unknown>> = {
-  "crm.create_contact":     { contact_id: `crm_${Date.now()}`,       status: "created" },
-  "crm.create_opportunity": { opportunity_id: `opp_${Date.now()}`,   status: "created" },
-  "crm.log_activity":       { activity_id: `act_${Date.now()}`,      status: "logged"  },
-  "calendar.create_event":  { event_id: `evt_${Date.now()}`,         event_link: "https://calendar.google.com/event?eid=mock", status: "created" },
-  "email.send_recap":       { sent_to: [],                            status: "delivered" },
-  "db.save_task":           { task_id: `task_${Date.now()}`,         status: "saved" },
-  "n8n.trigger_workflow":   { execution_id: `exec_${Date.now()}`,    status: "triggered" },
+  "crm_create_contact":     { contact_id: `crm_${Date.now()}`,       status: "created" },
+  "crm_create_opportunity": { opportunity_id: `opp_${Date.now()}`,   status: "created" },
+  "crm_log_activity":       { activity_id: `act_${Date.now()}`,      status: "logged"  },
+  "calendar_create_event":  { event_id: `evt_${Date.now()}`,         event_link: "https://calendar.google.com/event?eid=mock", status: "created" },
+  "email_send_recap":       { sent_to: [],                            status: "delivered" },
+  "db_save_task":           { task_id: `task_${Date.now()}`,         status: "saved" },
+  "n8n_trigger_workflow":   { execution_id: `exec_${Date.now()}`,    status: "triggered" },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -263,7 +263,7 @@ class MCPDispatcher implements IMCPDispatcher {
       const mock = { ...MOCK_RESPONSES[action.tool] };
 
       // For email recap, include the actual participants from params
-      if (action.tool === "email.send_recap" && action.params.participants) {
+      if (action.tool === "email_send_recap" && action.params.participants) {
         mock.sent_to = action.params.participants;
       }
 

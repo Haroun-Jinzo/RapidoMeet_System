@@ -25,6 +25,9 @@ import { requireAuth } from "./middleware/auth";
 import { internalRouter } from "./internal/tokenBroker";
 import { openclawClient } from "./openclaw/OpenClawClient";
 
+import multer from "multer";
+const upload = multer({ storage: multer.memoryStorage() });
+
 // ── Supabase Setup ────────────────────────────────────────────────────────
 // Initialize Supabase client for persistent audio storage
 
@@ -99,13 +102,13 @@ app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
 app.use('/internal', internalRouter);
 
 // Custom file handling - expects audio data in req.body
-const handleAudioUpload = (req: Request & { file?: { buffer: Buffer; mimetype: string } }, res: Response, next: NextFunction) => {
+const handleAudioUpload = (req: Request & { file?: any }, res: Response, next: NextFunction) => {
   if (req.body.audio && typeof req.body.audio === "string") {
     // If audio is base64-encoded in the body
     req.file = {
       buffer: Buffer.from(req.body.audio, "base64"),
       mimetype: req.body.audio_type || "audio/wav"
-    };
+    } as any;
   }
   next();
 };
@@ -118,6 +121,7 @@ const handleAudioUpload = (req: Request & { file?: { buffer: Buffer; mimetype: s
 app.post(
   "/upload-meeting",
   authMiddleware,
+  upload.single("audio"),
   handleAudioUpload,
   async (req: Request & { file?: { buffer: Buffer; mimetype: string } }, res: Response) => {
     const user = (req as any).user;
@@ -337,7 +341,8 @@ app.post('/sessions/:id/actions/:actionId/refuse', authMiddleware, async (req: R
 });
 
 async function handleActionDecision(req: Request, res: Response, decision: 'confirm' | 'refuse') {
-  const session_id = req.params.id as string; const action_id = req.params.actionId as string;
+  const session_id = req.params.id as string;
+  const action_id = req.params.actionId as string;
   const session = await sessionManager.load(session_id);
 
   if (!session) return res.status(404).json({ error: 'Session not found or expired' });
@@ -416,4 +421,3 @@ const server = app.listen(PORT, async () => {
 // Set timeout to 30 minutes (1800000 ms) to allow long audio processing
 server.setTimeout(1800000);
 console.log("[Server] Request timeout set to 30 minutes for large audio files");
-
