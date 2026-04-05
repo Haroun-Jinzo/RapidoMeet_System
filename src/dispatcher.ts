@@ -13,30 +13,16 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import {
   IMCPDispatcher,
   IAction,
-  IDispatchResult,
-  MCPTool,
+  IDispatchResult
 } from "./interfaces";
-
-// ── Mock responses for testing without actual MCP servers running ────────────
-const MOCK_RESPONSES: Record<MCPTool, Record<string, unknown>> = {
-  "crm_create_contact":     { contact_id: `crm_${Date.now()}`,       status: "created" },
-  "crm_create_opportunity": { opportunity_id: `opp_${Date.now()}`,   status: "created" },
-  "crm_log_activity":       { activity_id: `act_${Date.now()}`,      status: "logged"  },
-  "calendar_create_event":  { event_id: `evt_${Date.now()}`,         event_link: "https://calendar.google.com/event?eid=mock", status: "created" },
-  "email_send_recap":       { sent_to: [],                            status: "delivered" },
-  "db_save_task":           { task_id: `task_${Date.now()}`,         status: "saved" },
-  "n8n_trigger_workflow":   { execution_id: `exec_${Date.now()}`,    status: "triggered" },
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 class MCPDispatcher implements IMCPDispatcher {
 
-  // Map of domain to an active MCP Client (managing the 5 distinct servers)
+  // A generic Map storing our active MCP Client(s). 
+  // Map<K, V> is a TypeScript collection where keys are strings and values are Client instances.
   private mcpClients: Map<string, Client> = new Map();
-  
-  // ── Flip this to true when MCP servers are ready ───────────────────────────
-  private MCP_READY = false;
 
   // ── execute ────────────────────────────────────────────────────────────────
   // Executes one action with up to 3 retry attempts.
@@ -53,7 +39,7 @@ class MCPDispatcher implements IMCPDispatcher {
     let   retryCount  = 0;
 
     // Ensure clients are connected before executing
-    if (this.MCP_READY && this.mcpClients.size === 0) {
+    if (this.mcpClients.size === 0) {
       await this.initClients();
     }
 
@@ -202,91 +188,57 @@ class MCPDispatcher implements IMCPDispatcher {
   }
 
   // ── PRIVATE: initialize MCP Clients ────────────────────────────────────────
-  // Configures connections to the 5 MCP servers specified in the architecture.
+  // Configures the connection to our central n8n MCP server hub.
   private async initClients() {
-    const servers = {
-      crm:      process.env.MCP_CRM_URL      || "http://localhost:3001/sse",
-      calendar: process.env.MCP_CALENDAR_URL || "http://localhost:3002/sse",
-      email:    process.env.MCP_EMAIL_URL    || "http://localhost:3003/sse",
-      n8n:      process.env.MCP_N8N_URL      || "http://localhost:3004/sse",
-      files:    process.env.MCP_FILES_URL    || "http://localhost:3005/sse",
-    };
-
-    for (const [domain, url] of Object.entries(servers)) {
-      try {
-        const transport = new StreamableHTTPClientTransport(new URL(url));
-        const client = new Client(
-          { name: "RapidoMeetOrchestrator", version: "1.0.0" }, 
-          { capabilities: {} }
-        );
-        
-        // Note: In production you may await connect lazily or continuously retry
-        await client.connect(transport);
-        this.mcpClients.set(domain, client);
-        console.log(`[Dispatcher] Connected to ${domain.toUpperCase()} MCP server at ${url}`);
-      } catch (err) {
-        console.warn(`[Dispatcher] Failed to connect to ${domain.toUpperCase()} MCP server: ${(err as Error).message}`);
-      }
+    const url = process.env.MCP_N8N_URL;
+    
+    if (!url) {
+      console.warn("[Dispatcher] Missing MCP_N8N_URL in environment variables.");
+      return;
     }
-  }
 
-  // ── PRIVATE: determineDomain ───────────────────────────────────────────────
-  // Maps an MCPTool string to its respective Domain client.
-  private getDomainForTool(tool: string): string {
-    if (tool.startsWith("crm.")) return "crm";
-    if (tool.startsWith("calendar.")) return "calendar";
-    if (tool.startsWith("email.")) return "email";
-    if (tool.startsWith("db.")) return "files"; // routing DB tasks to files/data MCP
-    if (tool.startsWith("n8n.")) return "n8n";
-    return "n8n"; // Default fallback
+    try {
+      const transport = new StreamableHTTPClientTransport(new URL(url));
+      const client = new Client(
+        { name: "RapidoMeetOrchestrator", version: "1.0.0" }, 
+        { capabilities: {} }
+      );
+      
+      // Note: Await connection resolution through Server-Sent Events (SSE)
+      await client.connect(transport);
+      this.mcpClients.set("n8n", client);
+      console.log(`[Dispatcher] Connected to N8N MCP server at ${url}`);
+    } catch (err) {
+      // Type assertion "(err as Error).message" allows us to safely extract error text natively in TS
+      console.warn(`[Dispatcher] Failed to connect to N8N MCP server: ${(err as Error).message}`);
+    }
   }
 
   // ── PRIVATE: callMCPTool ───────────────────────────────────────────────────
   // The actual JSON-RPC call to the proper MCP server via the SDK.
-  // In mock mode, returns a fake response immediately.
-
+  
   private async callMCPTool(
     action: IAction
   ): Promise<Record<string, unknown>> {
 
-    // ── MOCK MODE ──────────────────────────────────────────────────────────
-    if (!this.MCP_READY) {
-      console.log(
-        `[Dispatcher] 🟡 MOCK — ${action.tool}`,
-        JSON.stringify(action.params, null, 2)
-      );
-
-      // Simulate network delay (100-300ms) so tests feel realistic
-      await this.sleep(100 + Math.random() * 200);
-
-      // Return mock response, replacing any dynamic IDs
-      const mock = { ...MOCK_RESPONSES[action.tool] };
-
-      // For email recap, include the actual participants from params
-      if (action.tool === "email_send_recap" && action.params.participants) {
-        mock.sent_to = action.params.participants;
-      }
-
-      return mock;
-    }
-    // ── END MOCK MODE ──────────────────────────────────────────────────────
-
     // ── LIVE MODE — real MCP Tool call ──────────────────────────────────
-    const domain = this.getDomainForTool(action.tool);
+    // Every AI action, whether 'email', 'calendar', or 'crm', resolves to n8n.
+    const domain = "n8n";
     const client = this.mcpClients.get(domain);
     
     if (!client) {
-      throw new Error(`MCP Client for domain "${domain}" is not connected.`);
+      throw new Error(`MCP Client for n8n is not connected.`);
     }
     
     try {
-      // Execute true MCP Tool call via standardized JSON-RPC over SSE
+      // Execute true MCP Tool call via standardized JSON-RPC
+      // Record<string, unknown> specifies an object with string keys and safely-typed arbitrary values.
       const result = await client.callTool({
         name: action.tool,
         arguments: action.params as Record<string, unknown>
       });
 
-      // Based on MCP standard, result has { content: [...] }
+      // Based on MCP standard, result contains the executable layout payload.
       const content = result.content;
       return { _mcpStatus: "success", tool: action.tool, content } as Record<string, unknown>;
     } catch (error) {

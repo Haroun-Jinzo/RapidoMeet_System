@@ -7,29 +7,7 @@
  */
 
 // ============================================================================
-// N8N Webhook Configuration
-// ============================================================================
 
-/** Flag to enable/disable N8N webhook calls (useful for testing) */
-export const N8N_ENABLED = process.env.N8N_ENABLED === 'true' || false;
-
-/** Base URL for N8N automation platform */
-export const N8N_BASE_URL = process.env.N8N_BASE_URL || 'http://localhost:5679';
-
-/** Map of tool names to their N8N webhook paths
- * Each key is a tool name, value is the corresponding webhook path
- */
-export const WEBHOOK_PATHS: Record<string, string> = {
-  'create_crm_task': '/webhook/create-crm-task',
-  'update_crm_contact': '/webhook/update-crm-contact',
-  'add_prospect': '/webhook/add-prospect',
-  'send_email': '/webhook/send-email',
-  'log_event': '/webhook/log-event',
-  'create_calendar_event': '/webhook/create-calendar-event',
-};
-
-// ============================================================================
-// MCP Tool Classification
 // ============================================================================
 
 /** Critical tools that ALWAYS require user confirmation before execution
@@ -54,7 +32,7 @@ export const NEVER_CRITICAL_TOOLS = new Set([
 /** Groq API configuration for speech-to-text transcription */
 export const GROQ_CONFIG = {
   model: 'whisper-large-v3',
-  maxFileSize: 5 * 1024 * 1024, // 25MB - Groq's limit
+  maxFileSize: 25 * 1024 * 1024, // 25MB - Groq's limit
 };
 
 /** Local Whisper configuration (faster-whisper) */
@@ -63,7 +41,7 @@ export const LOCAL_WHISPER_CONFIG = {
   model: 'base', // large-v3, base, small, tiny (using base for faster CPU inference)
   device: 'auto', // 'auto', 'cpu', 'cuda'
   computeType: 'float32', // 'float32', 'float16', 'int8'
-  sizeLimitForLocal: 24 * 1024 * 1024, // Use local whisper only for files > 24MB (Groq handles up to 25MB)
+  sizeLimitForLocal: 10 * 1024 * 1024, // Use local whisper only for files > 24MB (Groq handles up to 25MB)
 };
 
 /** Google Gemini API configuration for NLP tasks */

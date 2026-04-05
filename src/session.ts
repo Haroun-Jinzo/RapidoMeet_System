@@ -47,7 +47,7 @@ class SessionManager implements ISessionManager {
 
       this.redis.on("error", (err) => {
         this.isRedisAvailable = false;
-        console.warn("[Session] ⚠️  Redis unavailable — using in-memory storage:", err.message);
+        //console.warn("[Session] ⚠️  Redis unavailable — using in-memory storage:", err.message);
       });
 
       // Attempt initial connection but don't block if it fails

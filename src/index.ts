@@ -26,6 +26,14 @@ import { internalRouter } from "./internal/tokenBroker";
 import { openclawClient } from "./openclaw/OpenClawClient";
 
 import multer from "multer";
+
+type AudioUploadRequest = Omit<Request, "file"> & {
+  file?: {
+    buffer: Buffer;
+    mimetype: string;
+  };
+};
+
 const upload = multer({ storage: multer.memoryStorage() });
 
 // ── Supabase Setup ────────────────────────────────────────────────────────
@@ -102,13 +110,15 @@ app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
 app.use('/internal', internalRouter);
 
 // Custom file handling - expects audio data in req.body
-const handleAudioUpload = (req: Request & { file?: any }, res: Response, next: NextFunction) => {
-  if (req.body.audio && typeof req.body.audio === "string") {
+const handleAudioUpload: express.RequestHandler = (req, res, next) => {
+  const request = req as AudioUploadRequest;
+
+  if (request.body.audio && typeof request.body.audio === "string") {
     // If audio is base64-encoded in the body
-    req.file = {
-      buffer: Buffer.from(req.body.audio, "base64"),
-      mimetype: req.body.audio_type || "audio/wav"
-    } as any;
+    request.file = {
+      buffer: Buffer.from(request.body.audio, "base64"),
+      mimetype: request.body.audio_type || "audio/wav"
+    };
   }
   next();
 };
@@ -123,7 +133,7 @@ app.post(
   authMiddleware,
   upload.single("audio"),
   handleAudioUpload,
-  async (req: Request & { file?: { buffer: Buffer; mimetype: string } }, res: Response) => {
+  async (req: AudioUploadRequest, res: Response) => {
     const user = (req as any).user;
 
     if (!req.file) {
@@ -131,9 +141,9 @@ app.post(
     }
 
     const {
-      meeting_title = "Réunion sans titre",
-      meeting_type  = "general",
-      language      = "fr",
+      meeting_title = "",
+      meeting_type  = "",
+      language      = "",
       participants  = "",
     } = req.body;
 
