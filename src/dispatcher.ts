@@ -15,6 +15,7 @@ import {
   IAction,
   IDispatchResult
 } from "./interfaces";
+import { memoryManager } from "./memory";
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -122,6 +123,15 @@ class MCPDispatcher implements IMCPDispatcher {
       `${critical.length} pending confirmation`
     );
 
+    // TEMPORARY TEST TO PROVE N8N CONNECTION
+    nonCritical.push({
+      id: "test_action_123",
+      tool: "email_send_recap", 
+      params: { test: "Did n8n receive this?" },
+      requiresConfirmation: false,
+      status: "pending"
+    });
+
     // Execute non-critical actions immediately
     for (const action of nonCritical) {
       console.log(`[Dispatcher] Executing: ${action.tool}`);
@@ -216,10 +226,31 @@ class MCPDispatcher implements IMCPDispatcher {
 
   // ── PRIVATE: callMCPTool ───────────────────────────────────────────────────
   // The actual JSON-RPC call to the proper MCP server via the SDK.
+  // INTERCEPTS 'db_save_task' to execute directly against local Supabase.
   
   private async callMCPTool(
     action: IAction
   ): Promise<Record<string, unknown>> {
+    // 1. INTERCEPT LOCAL TASKS (Scalability optimization)
+    if (action.tool === "db_save_task") {
+      try {
+        console.log(`[Dispatcher] Intercepted db_save_task: Routing directly to local Supabase`);
+
+        // Ensure params perfectly matches the expected ITask shape in memory.ts
+        const id = await memoryManager.saveTask({
+          title: action.params.title as string,
+          assignee: (action.params.assignee as string) || undefined,
+          deadline: (action.params.deadline as string) || undefined,
+          priority: action.params.priority as "high" | "medium" | "low",
+          source: (action.params.source as string) || "System Generated",
+          sessionId: action.params.sessionId as string || "unknown_session",
+          userId: action.params.userId as string || "anon"
+      });
+      return { _mcpStatus: "success", tool: action.tool, content: [{ type: "text", text: `Task safely written to DB with ID ${id}` }] };
+    } catch (error) {
+      throw new Error(`Failed to save task in local memory: ${(error as Error).message}`);
+    }
+  }
 
     // ── LIVE MODE — real MCP Tool call ──────────────────────────────────
     // Every AI action, whether 'email', 'calendar', or 'crm', resolves to n8n.

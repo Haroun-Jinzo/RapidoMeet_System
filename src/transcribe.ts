@@ -23,6 +23,7 @@ import {
 } from "./interfaces";
 import { CircuitBreaker } from "./resilience/CircuitBreaker";
 import { GROQ_CONFIG, CIRCUIT_BREAKER_CONFIG, LOCAL_WHISPER_CONFIG } from "./config/services";
+import { splitAudioIfNeeded } from './utils/splitAudio';
 
 const execAsync = promisify(exec);
 
@@ -176,54 +177,80 @@ class Transcriber implements ITranscriber {
       console.log(`[Transcriber] File size ${fileSizeMB}MB is below threshold, using Groq API`);
       
       const startTime = Date.now();
+      
+      // 1. Split the massive buffer into smaller, safe chunks
+      const audioChunks = splitAudioIfNeeded(audioBuffer, mimeType);
+      console.log(`[Transcriber] File split into ${audioChunks.length} chunk(s) to avoid 524 Timeout`);
 
-      // ✅ Execute within circuit breaker protection
-      const transcription = await this.circuitBreaker.execute(async () => {
-        console.log(`[Transcriber] Calling Groq API... (waiting for response)`);
-        const groqStartTime = Date.now();
+      let fullTranscript = "";
+      let allSegments: ISpeakerSegment[] = [];
+      let totalDuration = 0;
+
+      // 2. Process each chunk one by one
+      for (let i = 0; i < audioChunks.length; i++) {
+        const chunkBuffer = audioChunks[i];
         
-        const result = await this.groq.audio.transcriptions.create({
-          file:     fs.createReadStream(tmpPath),
-          model:    GROQ_CONFIG.model,
-          language: language,
-          response_format: "verbose_json",
-          temperature: 0,
-        });
+        // Write the individual chunk to a temp file
+        const chunkTmpPath = path.join(os.tmpdir(), `chunk_${Date.now()}_${i}${ext}`);
+        fs.writeFileSync(chunkTmpPath, chunkBuffer);
 
-        const groqElapsed = ((Date.now() - groqStartTime) / 1000).toFixed(1);
-        console.log(`[Transcriber] Groq API responded in ${groqElapsed}s`);
-        return result;
-      });
+        console.log(`[Transcriber] Transcribing chunk ${i + 1}/${audioChunks.length}...`);
+
+        try {
+          // Clean the language parameter to ensure it's valid for Groq
+          const safeLanguage = language.trim() || undefined;
+
+          // Send the small chunk to Groq
+          const transcription = await this.circuitBreaker.execute(async () => {
+             return await this.groq.audio.transcriptions.create({
+                file: fs.createReadStream(chunkTmpPath),
+                model: GROQ_CONFIG.model,
+                language: safeLanguage,
+                response_format: "verbose_json",
+                temperature: 0,
+             });
+          });
+
+          // Append text
+          const chunkText = transcription.text?.trim() || "";
+          fullTranscript += " " + chunkText;
+
+          // Process boundaries (padding times so segment 2 doesn't restart at 0:00)
+          const chunkSegments = this.buildSegments((transcription as any).segments || []);
+          const paddedSegments = chunkSegments.map(s => ({
+            ...s,
+            start: s.start + totalDuration,
+            end: s.end + totalDuration
+          }));
+          
+          allSegments.push(...paddedSegments);
+
+          // Update duration for the next chunk's offset
+          totalDuration += chunkSegments.length > 0 
+             ? chunkSegments[chunkSegments.length - 1].end 
+             : 0;
+
+        } finally {
+          // Always clean up chunk temp file
+          if (fs.existsSync(chunkTmpPath)) {
+            fs.unlinkSync(chunkTmpPath);
+          }
+        }
+      }
 
       const elapsed = Date.now() - startTime;
 
-      // Extract transcript text and build segment structure
-      const transcript = transcription.text?.trim() || "";
-
-      // ⚠️ Limitation: Whisper provides segment boundaries but NOT speaker identification
-      // All segments are labeled "Speaker 0" because Whisper is speaker-agnostic
-      // For true speaker diarization: use pyannote.audio or AssemblyAI
-      const segments: ISpeakerSegment[] = this.buildSegments(
-        (transcription as any).segments || []
-      );
-
-      // Calculate total duration from last segment's end time
-      // If no segments exist, duration = 0
-      const duration = segments.length > 0
-        ? segments[segments.length - 1].end
-        : 0;
-
       console.log(
         `[Transcriber] Complete — ` +
-        `duration: ${Math.round(duration)}s, ` +
-        `segments: ${segments.length}, ` +
+        `duration: ${Math.round(totalDuration)}s, ` +
+        `segments: ${allSegments.length}, ` +
         `elapsed: ${elapsed}ms`
       );
 
       return {
-        transcript,
-        segments,
-        duration,
+        transcript: fullTranscript.trim(),
+        segments: allSegments,
+        duration: totalDuration,
         confidence: 0.95,  // Whisper doesn't return confidence scores — use fixed value
         language,
       };
