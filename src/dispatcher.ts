@@ -124,13 +124,18 @@ class MCPDispatcher implements IMCPDispatcher {
     );
 
     // TEMPORARY TEST TO PROVE N8N CONNECTION
-    nonCritical.push({
-      id: "test_action_123",
-      tool: "email_send_recap", 
-      params: { test: "Did n8n receive this?" },
-      requiresConfirmation: false,
-      status: "pending"
-    });
+    let TestAction :IAction =  {
+    id: "test_action_123",
+    tool: "email_send_recap", 
+    params: { 
+      target_email: "harounkhmiri247@gmail.com", 
+      subject: "N8N Connection Test",
+      message_body: "Did n8n receive this?" 
+    },
+    requiresConfirmation: false,
+    status: "pending"
+    };
+    nonCritical.push(TestAction);
 
     // Execute non-critical actions immediately
     for (const action of nonCritical) {
@@ -208,7 +213,7 @@ class MCPDispatcher implements IMCPDispatcher {
     }
 
     try {
-      const transport = new StreamableHTTPClientTransport(new URL(url));
+      const transport = new StreamableHTTPClientTransport(new URL(url), {requestInit: { headers: {"X-N8N-API-KEY": process.env.N8N_API_KEY}}});
       const client = new Client(
         { name: "RapidoMeetOrchestrator", version: "1.0.0" }, 
         { capabilities: {} }
@@ -268,6 +273,9 @@ class MCPDispatcher implements IMCPDispatcher {
         name: action.tool,
         arguments: action.params as Record<string, unknown>
       });
+
+      // 🚨 LOG EXACTLY WHAT N8N SAYS BACK 🚨
+      console.log(`[N8N RESPONSE for ${action.tool}]:`, JSON.stringify(result, null, 2));
 
       // Based on MCP standard, result contains the executable layout payload.
       const content = result.content;

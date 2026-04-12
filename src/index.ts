@@ -225,7 +225,7 @@ app.post(
           console.warn("[Pipeline] OpenClaw WS notify failed:", err); 
         }
 
-        return res.json({
+        /*return res.json({
           session_id:       session.id,
           status:           "awaiting_confirmation",
           transcription:    { transcript: transcription.transcript, duration: transcription.duration },
@@ -237,7 +237,7 @@ app.post(
             params:    a.params,
           })),
           message: `${pendingCritical.length} action(s) require your confirmation before executing.`,
-        });
+        });*/
       }
 
       // ── Step 5: Delegate Executions to OpenClaw ────────────────────────────
@@ -254,8 +254,11 @@ app.post(
       } catch (err) {
         console.warn("[Pipeline] Failed to notify OpenClaw WS:", err);
       }
+
+      // 🚨 ADD THIS BLOCK TO ACTUALLY TRIGGER N8N 🚨
+      console.log(`[Pipeline] ${session.id} — Executing MCP Tools via N8N...`);
+      const results = await mcpDispatcher.executeAll(actions, session.id);
       
-      const results: any[] = [];
       let notifications: any[] = []; // handled by OpenClaw now
 
       // Save completed meeting to PostgreSQL (non-fatal if fails)

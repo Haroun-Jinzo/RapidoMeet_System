@@ -32,7 +32,7 @@ export const NEVER_CRITICAL_TOOLS = new Set([
 /** Groq API configuration for speech-to-text transcription */
 export const GROQ_CONFIG = {
   model: 'whisper-large-v3',
-  maxFileSize: 25 * 1024 * 1024, // 25MB - Groq's limit
+  maxFileSize: 10 * 1024 * 1024, // 25MB - Groq's limit
 };
 
 /** Local Whisper configuration (faster-whisper) */
@@ -41,7 +41,7 @@ export const LOCAL_WHISPER_CONFIG = {
   model: 'base', // large-v3, base, small, tiny (using base for faster CPU inference)
   device: 'auto', // 'auto', 'cpu', 'cuda'
   computeType: 'float32', // 'float32', 'float16', 'int8'
-  sizeLimitForLocal: 24 * 1024 * 1024, // Use local whisper only for files > 24MB (Groq handles up to 25MB)
+  sizeLimitForLocal: 10 * 1024 * 1024, // Use local whisper only for files > 24MB (Groq handles up to 25MB)
 };
 
 /** Google Gemini API configuration for NLP tasks */

