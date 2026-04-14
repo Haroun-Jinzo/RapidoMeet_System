@@ -145,6 +145,7 @@ app.post(
       meeting_type  = "",
       language      = "",
       participants  = "",
+      user_instructions = "", // <-- Extract the new field here
     } = req.body;
 
     // ── Step 1: Create session ─────────────────────────────────────────────
@@ -191,7 +192,8 @@ app.post(
       const actions = await intentRouter.decide(
         extraction,
         session.id,
-        skill.content
+        skill.content,
+        user_instructions
       );
       session.actions = actions;
       await sessionManager.save(session);

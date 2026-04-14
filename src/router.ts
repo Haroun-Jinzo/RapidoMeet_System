@@ -88,7 +88,8 @@ class IntentRouter implements IIntentRouter {
   async decide(
     extraction:   INLPOutput,
     sessionId:    string,
-    skillContent: string
+    skillContent: string,
+    userInstructions?: string
   ): Promise<IAction[]> {
     console.log(
       `[IntentRouter] Deciding actions for session ${sessionId} — ` +
@@ -102,7 +103,7 @@ class IntentRouter implements IIntentRouter {
     // Configure Gemini for deterministic routing
     const model = this.genAI.getGenerativeModel({
       model: GEMINI_CONFIG.model,
-      systemInstruction: this.buildSystemPrompt(),
+      systemInstruction: this.buildSystemPrompt(userInstructions),
       generationConfig: {
         responseMimeType: "application/json",
         temperature:      0.0, // Zero creativity — routing must be deterministic
@@ -160,12 +161,12 @@ class IntentRouter implements IIntentRouter {
    * Build system prompt defining Gemini's routing role
    * @returns System prompt string
    */
-  private buildSystemPrompt(): string {
+  private buildSystemPrompt(userInstructions?: string): string { 
     return `
 You are the action router for RapidoMeet, an AI meeting assistant.
 
 Your job is to analyse meeting extraction data and decide which MCP (Model Context Protocol) actions to execute.
-
+These are additional infromations added by the user to help you make you route better decisions. ${userInstructions}
 ## Available MCP Tools
 
 | Tool | What it does | Risk level |
