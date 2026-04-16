@@ -47,7 +47,13 @@ const TaskSchema = z.object({
   title:    z.string().min(1).describe("Action item title"),
   assignee: z.string().optional().nullable().describe("Person responsible"),
   deadline: z.string().optional().nullable().describe("YYYY-MM-DD or text description"),
-  priority: z.enum(["high", "medium", "low"]).describe("Task urgency"),
+  priority: z.preprocess((val) => {
+    if (typeof val !== 'string') return 'medium';
+    const normalized = val.toLowerCase().trim();
+    if (["haute", "élevée", "fort", "forte", "high"].includes(normalized)) return "high";
+    if (["basse", "faible", "low"].includes(normalized)) return "low";
+    return "medium";
+  }, z.enum(["high", "medium", "low"])).describe("Task urgency"),
   source:   z.string().min(1).describe("Exact quote from transcript"),
 });
 
@@ -59,11 +65,17 @@ const DecisionSchema = z.object({
 
 /** Schema for a sales lead or prospect mentioned */
 const ProspectSchema = z.object({
-  company:  z.string().min(1).describe("Company name"),
+  company:  z.string().optional().nullable().describe("Company name"),
   contact:  z.string().optional().nullable().describe("Contact person"),
   email:    z.string().optional().nullable().describe("Contact email"),
   phone:    z.string().optional().nullable().describe("Contact phone"),
-  score:    z.enum(["hot", "warm", "cold"]).describe("Sales qualification"),
+  score:    z.preprocess((val) => {
+    if (typeof val !== 'string') return 'warm';
+    const normalized = val.toLowerCase().trim();
+    if (["chaud", "chaude", "hot"].includes(normalized)) return "hot";
+    if (["froid", "froide", "cold"].includes(normalized)) return "cold";
+    return "warm";
+  }, z.enum(["hot", "warm", "cold"])).describe("Sales qualification"),
   interest: z.string().optional().nullable().describe("What they're interested in"),
   nextStep: z.string().optional().nullable().describe("Agreed next action"),
 });
@@ -71,7 +83,13 @@ const ProspectSchema = z.object({
 /** Complete schema for Gemini response validation */
 const NLPOutputSchema = z.object({
   summary:   z.string().min(10).describe("Meeting summary"),
-  sentiment: z.enum(["positive", "neutral", "negative"]).describe("Overall tone"),
+  sentiment: z.preprocess((val) => {
+    if (typeof val !== 'string') return 'neutral';
+    const normalized = val.toLowerCase().trim();
+    if (["positif", "positive"].includes(normalized)) return "positive";
+    if (["négatif", "negative", "négative"].includes(normalized)) return "negative";
+    return "neutral";
+  }, z.enum(["positive", "neutral", "negative"])).describe("Overall tone"),
   tasks:     z.array(TaskSchema).describe("Extracted action items"),
   decisions: z.array(DecisionSchema).describe("Strategic decisions"),
   prospects: z.array(ProspectSchema).describe("Sales opportunities"),
@@ -384,7 +402,7 @@ Return ONLY the JSON object. No other text, no markdown formatting.
       })),
 
       prospects: validated.prospects.map((p): IProspect => ({
-        company:  p.company,
+        company:  p.company  ?? "Unknown Company",
         contact:  p.contact  ?? undefined,
         email:    p.email    ?? undefined,
         phone:    p.phone    ?? undefined,

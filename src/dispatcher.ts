@@ -124,7 +124,7 @@ class MCPDispatcher implements IMCPDispatcher {
     );
 
     // TEMPORARY TEST TO PROVE N8N CONNECTION
-    let TestAction :IAction =  {
+    /*const TestAction :IAction =  {
     id: "test_action_123",
     tool: "email_send_recap", 
     params: { 
@@ -135,7 +135,7 @@ class MCPDispatcher implements IMCPDispatcher {
     requiresConfirmation: false,
     status: "pending"
     };
-    nonCritical.push(TestAction);
+    nonCritical.push(TestAction);*/
 
     // Execute non-critical actions immediately
     for (const action of nonCritical) {

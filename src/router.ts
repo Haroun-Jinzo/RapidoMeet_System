@@ -111,7 +111,7 @@ class IntentRouter implements IIntentRouter {
       },
     });
 
-    const userPrompt = this.buildUserPrompt(extraction, skillContent);
+    const userPrompt = this.buildUserPrompt(extraction, skillContent, userInstructions);
 
     try {
       // Execute within circuit breaker protection with timeout
@@ -130,6 +130,32 @@ class IntentRouter implements IIntentRouter {
 
       // Parse and validate Gemini's decision
       const decisions = this.parseAndValidate(rawText);
+
+      // WORKAROUND: Programmatically extract email from all text to guarantee it's set
+      const allTextContext = `${userInstructions || ""} ${JSON.stringify(extraction)}`;
+      const emailMatch = allTextContext.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+      
+      let emailAction = decisions.actions.find(a => a.tool === "email_send_recap");
+      
+      // Force creation if Gemini forgot the action completely
+      if (!emailAction) {
+        emailAction = {
+          tool: "email_send_recap",
+          params: {
+            target_email: "admin@example.com",
+            subject: "Meeting Recap",
+            message_body: decisions.summary || "Meeting recap is ready."
+          },
+          requiresConfirmation: false,
+          reason: "Fallback created by router"
+        };
+        decisions.actions.push(emailAction);
+      }
+
+      // Overwrite the destination email if we found an email address in any of the texts
+      if (emailMatch) {
+        emailAction.params.target_email = emailMatch[0];
+      }
 
       // Convert decisions to IAction objects with enforced confirmation rules
       const actions = this.buildActions(decisions);
@@ -166,7 +192,8 @@ class IntentRouter implements IIntentRouter {
 You are the action router for RapidoMeet, an AI meeting assistant.
 
 Your job is to analyse meeting extraction data and decide which MCP (Model Context Protocol) actions to execute.
-These are additional infromations added by the user to help you make you route better decisions. ${userInstructions}
+User Instructions: ${userInstructions ? `Apply these instructions strictly! If an email address is mentioned here, you MUST use it as the "target_email" for the email_send_recap tool. Also modify the "message_body" based on these instructions: ${userInstructions}` : "None"}
+
 ## Available MCP Tools
 
 | Tool | What it does | Risk level |
@@ -194,8 +221,9 @@ requiresConfirmation MUST be false for NEVER_CRITICAL tools:
 
 1. Create one db_save_task for each task in extraction
 2. Create one crm_create_contact for each new prospect
-3. Create calendar_create_event if follow-up meeting mentioned
-4. Always create email_send_recap at end (last action)
+3. Create calendar_create_event if a task or decision mentions scheduling a meeting, a call, or an event in the future.
+4. Always create email_send_recap at end (last action). For "target_email", you MUST extract the actual email address provided by the user in the Instructions above. If no email is found, or if instructions are empty, fallback to "admin@example.com". NEVER output null or placeholder text.
+5. In your Output Format, replace all example values (like "user@example.com" or "Thomas") with the real data extracted from the meeting and instructions.
 5. Only create crm_log_activity if CRM contact exists
 6. Don't create actions for vague/uncertain information
 7. Keep params concise — only use explicit information
@@ -210,11 +238,15 @@ Return ONLY valid JSON object.
    */
   private buildUserPrompt(
     extraction:   INLPOutput,
-    skillContent: string
+    skillContent: string,
+    userInstructions?: string
   ): string {
     return `
 ## Active Skill Instructions
 ${skillContent}
+
+## Extra User Instructions
+${userInstructions ? userInstructions : "None"}
 
 ## Meeting Extraction Data
 Summary: ${extraction.summary}
@@ -240,7 +272,7 @@ ${extraction.prospects.map((p, i) =>
 {
   "actions": [
     {
-      "tool": "crm.create_contact",
+      "tool": "crm_create_contact",
       "params": {
         "first_name": "Thomas",
         "last_name": "Laurent",
@@ -251,13 +283,36 @@ ${extraction.prospects.map((p, i) =>
       },
       "requiresConfirmation": true,
       "reason": "New prospect identified"
-    }
+    },
+    {
+      "tool": "db_save_task",
+      "params": {
+        "title": "Clear action item title",
+        "assignee": "Person name",
+        "deadline": "2026-04-30",
+        "priority": "medium",
+        "source": "Exact quote from transcript"
+      },
+      "requiresConfirmation": false,
+      "reason": "Saving task to local memory"
+    },
+    {
+      "tool": "calendar_create_event",
+      "params": {
+        "summary": "Avril 2026 Event",
+        "description": "Event created from meeting",
+        "start_time": "2026-04-01T09:00:00Z",
+        "end_time": "2026-04-01T10:00:00Z"
+      },
+      "requiresConfirmation": false,
+      "reason": "Event scheduling mentioned in meeting"
+    },
     {
       "tool": "email_send_recap",
       "params": {
-      "target_email":"harounkhmiri247@gmail.com",
-      "subject": "email recap",
-      "message_body": "Insert the recap summary of the transcription here"
+        "target_email": "user@example.com",
+        "subject": "email recap",
+        "message_body": "Insert the recap summary of the transcription here. Integrate any given User Instructions."
       },
       "requiresConfirmation": false,
       "reason": "Sending meeting summary"
