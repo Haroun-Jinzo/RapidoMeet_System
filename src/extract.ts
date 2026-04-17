@@ -101,18 +101,9 @@ const NLPOutputSchema = z.object({
 // ============================================================================
 
 class TaskExtractor implements ITaskExtractor {
-  private genAI: GoogleGenerativeAI;
   private circuitBreaker: CircuitBreaker;
 
   constructor() {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        "[TaskExtractor] GEMINI_API_KEY is not set in environment variables"
-      );
-    }
-    this.genAI = new GoogleGenerativeAI(apiKey);
-    
     // Initialize circuit breaker to protect against Gemini API failures
     // When Gemini experiences repeated timeouts/errors, circuit breaker
     // will fail fast instead of cascading into retry storms
@@ -139,8 +130,13 @@ class TaskExtractor implements ITaskExtractor {
   async extract(
     transcript:   string,
     meetingType:  MeetingType,
-    skillContent: string
+    skillContent: string,
+    apiKeys?:     any
   ): Promise<INLPOutput> {
+    const apiKey = apiKeys?.gemini || process.env.GEMINI_API_KEY;
+    if (!apiKey) throw new Error("API key not configured");
+    const genAI = new GoogleGenerativeAI(apiKey);
+
     console.log(
       `[TaskExtractor] Starting NLP extraction — ` +
       `type: ${meetingType}, ` +
@@ -156,7 +152,7 @@ class TaskExtractor implements ITaskExtractor {
     const userPrompt = this.buildUserPrompt(transcript, meetingType, skillContent);
 
     // Get model instance with configuration
-    const model = this.genAI.getGenerativeModel({
+    const model = genAI.getGenerativeModel({
       model: GEMINI_CONFIG.model,  // e.g., "gemini-2.0-flash"
       systemInstruction: systemPrompt,
       generationConfig: {

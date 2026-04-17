@@ -15,6 +15,7 @@ dotenv.config();
 // Import all module instances
 import { transcriber } from "./transcribe";
 import { taskExtractor } from "./extract";
+import { KeyResolver } from "./utils/KeyResolver";
 import { intentRouter } from "./router";
 import { mcpDispatcher } from "./dispatcher";
 import { sessionManager } from "./session";
@@ -163,12 +164,16 @@ app.post(
     await sessionManager.save(session);
 
     try {
+      // Resolve dynamic API keys based on the user's Supabase vaulted preferences
+      const apiKeys = await KeyResolver.resolveKeys(user);
+
       // ── Step 2: Transcribe ───────────────────────────────────────────────
       console.log(`[Pipeline] ${session.id} — Step 1: Transcription`);
       const transcription = await transcriber.transcribeFile(
         req.file.buffer,
         req.file.mimetype,
-        language
+        language,
+        apiKeys
       );
       session.transcript = transcription.transcript;
       await sessionManager.save(session);
@@ -182,7 +187,8 @@ app.post(
       const extraction = await taskExtractor.extract(
         transcription.transcript,
         meeting_type as any,
-        skill.content
+        skill.content,
+        apiKeys
       );
       session.extraction = extraction;
       await sessionManager.save(session);
@@ -193,7 +199,8 @@ app.post(
         extraction,
         session.id,
         skill.content,
-        user_instructions
+        user_instructions,
+        apiKeys
       );
       session.actions = actions;
       await sessionManager.save(session);
@@ -259,7 +266,7 @@ app.post(
 
       // 🚨 ADD THIS BLOCK TO ACTUALLY TRIGGER N8N 🚨
       console.log(`[Pipeline] ${session.id} — Executing MCP Tools via N8N...`);
-      const results = await mcpDispatcher.executeAll(actions, session.id);
+      const results = await mcpDispatcher.executeAll(actions, session.id, apiKeys);
       
       let notifications: any[] = []; // handled by OpenClaw now
 
@@ -367,6 +374,12 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
 
   action.status = decision === 'confirm' ? 'confirmed' : 'refused';
   console.log(`[Gate] Action ${action_id} ${action.status.toUpperCase()}`);
+
+  if (decision === 'confirm') {
+    // Inject BYOK API keys into the dispatcher 
+    const apiKeys = await KeyResolver.resolveKeys(session.userId);
+    await mcpDispatcher.resume(action, session_id, apiKeys);
+  }
 
   const stillPending = session.actions?.filter(
     (a: any) => a.requiresConfirmation && a.status === 'pending' && a.id !== action_id

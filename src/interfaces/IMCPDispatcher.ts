@@ -13,7 +13,7 @@ export interface IMCPDispatcher {
    * Execute one non-critical action immediately.
    * Used for: calendar events, email recaps, saving tasks.
    */
-  execute(action: IAction): Promise<IDispatchResult>;
+  execute(action: IAction, apiKeys?: any): Promise<IDispatchResult>;
 
   /**
    * Execute all non-critical actions in a session in order.
@@ -21,7 +21,8 @@ export interface IMCPDispatcher {
    */
   executeAll(
     actions:   IAction[],
-    sessionId: string
+    sessionId: string,
+    apiKeys?:  any
   ): Promise<IDispatchResult[]>;
 
   /**
@@ -30,7 +31,8 @@ export interface IMCPDispatcher {
    */
   resume(
     action:    IAction,
-    sessionId: string
+    sessionId: string,
+    apiKeys?:  any
   ): Promise<IDispatchResult>;
 }
 

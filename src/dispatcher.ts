@@ -34,19 +34,21 @@ class MCPDispatcher implements IMCPDispatcher {
   //   If MCP tools are temporarily overloaded, hammering it every 100ms makes things
   //   worse. Waiting longer between each retry gives it time to recover.
 
-  async execute(action: IAction): Promise<IDispatchResult> {
+  async execute(action: IAction, apiKeys?: any): Promise<IDispatchResult> {
     const maxRetries  = 3;
     let   lastError   = "";
     let   retryCount  = 0;
 
+    const n8nApiKey = apiKeys?.n8n || process.env.N8N_API_KEY;
+
     // Ensure clients are connected before executing
-    if (this.mcpClients.size === 0) {
-      await this.initClients();
+    if (!this.mcpClients.has(n8nApiKey as string)) {
+      await this.initClients(n8nApiKey as string);
     }
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const result = await this.callMCPTool(action);
+        const result = await this.callMCPTool(action, n8nApiKey as string);
 
         // Success — update action status and return
         action.status = "executed";
@@ -109,7 +111,8 @@ class MCPDispatcher implements IMCPDispatcher {
 
   async executeAll(
     actions:   IAction[],
-    sessionId: string
+    sessionId: string,
+    apiKeys?:  any
   ): Promise<IDispatchResult[]> {
     const results: IDispatchResult[] = [];
 
@@ -140,7 +143,7 @@ class MCPDispatcher implements IMCPDispatcher {
     // Execute non-critical actions immediately
     for (const action of nonCritical) {
       console.log(`[Dispatcher] Executing: ${action.tool}`);
-      const result = await this.execute(action);
+      const result = await this.execute(action, apiKeys);
       results.push(result);
 
       // If an action fails, log it but continue with the rest.
@@ -172,7 +175,8 @@ class MCPDispatcher implements IMCPDispatcher {
 
   async resume(
     action:    IAction,
-    sessionId: string
+    sessionId: string,
+    apiKeys?:  any
   ): Promise<IDispatchResult> {
     if (action.status === "refused" || action.status === "timeout") {
       console.log(
@@ -199,29 +203,30 @@ class MCPDispatcher implements IMCPDispatcher {
       `${action.tool} (session: ${sessionId})`
     );
 
-    return this.execute(action);
+    return this.execute(action, apiKeys);
   }
 
   // ── PRIVATE: initialize MCP Clients ────────────────────────────────────────
   // Configures the connection to our central n8n MCP server hub.
-  private async initClients() {
+  private async initClients(n8nApiKey?: string) {
     const url = process.env.MCP_N8N_URL;
-    
+
     if (!url) {
       console.warn("[Dispatcher] Missing MCP_N8N_URL in environment variables.");
       return;
     }
 
     try {
-      const transport = new StreamableHTTPClientTransport(new URL(url), {requestInit: { headers: {"X-N8N-API-KEY": process.env.N8N_API_KEY}}});
+      const apiKey = n8nApiKey || process.env.N8N_API_KEY;
+      const transport = new StreamableHTTPClientTransport(new URL(url), {requestInit: { headers: {"X-N8N-API-KEY": apiKey}}});
       const client = new Client(
-        { name: "RapidoMeetOrchestrator", version: "1.0.0" }, 
+        { name: "RapidoMeetOrchestrator", version: "1.0.0" },
         { capabilities: {} }
       );
-      
+
       // Note: Await connection resolution through Server-Sent Events (SSE)
       await client.connect(transport);
-      this.mcpClients.set("n8n", client);
+      this.mcpClients.set(apiKey as string, client);
       console.log(`[Dispatcher] Connected to N8N MCP server at ${url}`);
     } catch (err) {
       // Type assertion "(err as Error).message" allows us to safely extract error text natively in TS
@@ -234,7 +239,8 @@ class MCPDispatcher implements IMCPDispatcher {
   // INTERCEPTS 'db_save_task' to execute directly against local Supabase.
   
   private async callMCPTool(
-    action: IAction
+    action: IAction,
+    n8nApiKey?: string
   ): Promise<Record<string, unknown>> {
     // 1. INTERCEPT LOCAL TASKS (Scalability optimization)
     if (action.tool === "db_save_task") {
@@ -259,9 +265,9 @@ class MCPDispatcher implements IMCPDispatcher {
 
     // ── LIVE MODE — real MCP Tool call ──────────────────────────────────
     // Every AI action, whether 'email', 'calendar', or 'crm', resolves to n8n.
-    const domain = "n8n";
-    const client = this.mcpClients.get(domain);
-    
+    const apiKey = n8nApiKey || process.env.N8N_API_KEY;
+    const client = this.mcpClients.get(apiKey as string);
+
     if (!client) {
       throw new Error(`MCP Client for n8n is not connected.`);
     }

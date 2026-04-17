@@ -56,15 +56,9 @@ const RouterOutputSchema = z.object({
 // ============================================================================
 
 class IntentRouter implements IIntentRouter {
-  private genAI: GoogleGenerativeAI;
   private circuitBreaker: CircuitBreaker;
 
   constructor() {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("[IntentRouter] GEMINI_API_KEY is not set");
-    }
-    this.genAI = new GoogleGenerativeAI(apiKey);
     this.circuitBreaker = new CircuitBreaker('gemini-router', CIRCUIT_BREAKER_CONFIG);
     console.log("[IntentRouter] Gemini client initialised with circuit breaker protection");
   }
@@ -89,8 +83,13 @@ class IntentRouter implements IIntentRouter {
     extraction:   INLPOutput,
     sessionId:    string,
     skillContent: string,
-    userInstructions?: string
+    userInstructions?: string,
+    apiKeys?: any
   ): Promise<IAction[]> {
+    const apiKey = apiKeys?.gemini || process.env.GEMINI_API_KEY;
+    if (!apiKey) throw new Error("API key not configured");
+    const genAI = new GoogleGenerativeAI(apiKey);
+
     console.log(
       `[IntentRouter] Deciding actions for session ${sessionId} — ` +
       `tasks: ${extraction.tasks.length}, ` +
@@ -101,7 +100,7 @@ class IntentRouter implements IIntentRouter {
     const startTime = Date.now();
 
     // Configure Gemini for deterministic routing
-    const model = this.genAI.getGenerativeModel({
+    const model = genAI.getGenerativeModel({
       model: GEMINI_CONFIG.model,
       systemInstruction: this.buildSystemPrompt(userInstructions),
       generationConfig: {

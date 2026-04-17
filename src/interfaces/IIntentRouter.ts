@@ -13,13 +13,10 @@ export interface IIntentRouter {
     extraction:   INLPOutput,  // What was found in the meeting
     sessionId:    string,      // For logging and tracing
     skillContent: string,       // Active Skill file may override routing rules
-    userInstructions?: string       // Optional user instructions for routing
+    userInstructions?: string,       // Optional user instructions for routing
+    apiKeys?: any
   ): Promise<IAction[]>;
 }
-
-// SECTION 6 — DISPATCHER (dispatcher.ts)
-// Executes actions by calling N8N webhooks.
-
 /**
  * Result of executing one action via N8N.
  */

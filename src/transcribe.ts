@@ -42,28 +42,15 @@ const execAsync = promisify(exec);
  */
 class Transcriber implements ITranscriber {
 
-  private groq: Groq;
   private circuitBreaker: CircuitBreaker;
 
   constructor() {
-    const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        "[Transcriber] GROQ_API_KEY is not set in environment variables"
-      );
-    }
-    // Initialize Groq with 10-minute timeout for large audio files
-    this.groq = new Groq({ 
-      apiKey,
-      timeout: 10 * 60 * 1000, // 10 minutes
-    });
-    
     // Initialize circuit breaker to protect against cascading failures
-    // If Groq API becomes unresponsive, circuit breaker will fail fast
+    // If API becomes unresponsive, circuit breaker will fail fast
     // instead of causing request timeouts and retry storms
-    this.circuitBreaker = new CircuitBreaker('groq-transcriber', CIRCUIT_BREAKER_CONFIG);
+    this.circuitBreaker = new CircuitBreaker('transcriber', CIRCUIT_BREAKER_CONFIG);
     
-    console.log("[Transcriber] Groq Whisper client initialised with 10-min timeout and circuit breaker protection");
+    console.log("[Transcriber] Client initialised with circuit breaker protection");
   }
 
   /**
@@ -144,8 +131,13 @@ class Transcriber implements ITranscriber {
   async transcribeFile(
     audioBuffer: Buffer,
     mimeType:    string,
-    language:    string = "fr"
+    language:    string = "fr",
+    apiKeys?:    any
   ): Promise<ITranscriptionResult> {
+    const apiKey = apiKeys?.groq || process.env.GROQ_API_KEY;
+    if (!apiKey) throw new Error("API key not configured");
+    const groq = new Groq({ apiKey, timeout: 10 * 60 * 1000 });
+
     const fileSizeMB = Math.round(audioBuffer.length / 1024 / 1024);
     console.log(
       `[Transcriber] Starting transcription — ` +
@@ -202,7 +194,7 @@ class Transcriber implements ITranscriber {
 
           // Send the small chunk to Groq
           const transcription = await this.circuitBreaker.execute(async () => {
-             return await this.groq.audio.transcriptions.create({
+             return await groq.audio.transcriptions.create({
                 file: fs.createReadStream(chunkTmpPath),
                 model: GROQ_CONFIG.model,
                 language: safeLanguage,
@@ -284,7 +276,8 @@ class Transcriber implements ITranscriber {
    */
   async transcribeStream(
     stream:    NodeJS.ReadableStream,
-    onPartial: (text: string) => void
+    onPartial: (text: string) => void,
+    apiKeys?:  any
   ): Promise<ITranscriptionResult> {
     console.log("[Transcriber] Initializing stream collection for batch transcription");
 
@@ -320,7 +313,7 @@ class Transcriber implements ITranscriber {
           const fullBuffer = Buffer.concat(chunks);
           // Assume WAV format from Playwright bot recording
           // ⚠️ TODO: Detect format from stream metadata instead of assuming
-          const result = await this.transcribeFile(fullBuffer, "audio/wav");
+          const result = await this.transcribeFile(fullBuffer, "audio/wav", "fr", apiKeys);
           resolve(result);
         } catch (error) {
           reject(error);
