@@ -205,72 +205,11 @@ app.post(
       session.actions = actions;
       await sessionManager.save(session);
 
-      // ── Step 5: Check for critical actions ──────────────────────────────
-      const pendingCritical = actions.filter(
-        a => a.requiresConfirmation && a.status === "pending"
-      );
-
-      if (pendingCritical.length > 0) {
-        // Pipeline pauses here — session goes into awaiting_confirmation
-        session.status = "awaiting_confirmation";
-        await sessionManager.save(session);
-
-        console.log(
-          `[Pipeline] ${session.id} — Paused: ` +
-          `${pendingCritical.length} action(s) awaiting confirmation`
-        );
-
-        // Notify OpenClaw about awaiting confirmation
-        try {
-          await openclawClient.sendReport("meeting.awaiting_confirmation", {
-            session_id: session.id,
-            user_id: session.userId,
-            transcript_summary: extraction.summary,
-            extraction_json: extraction,
-            proposed_actions: actions,
-            pending_critical: pendingCritical,
-          });
-        } catch(err) { 
-          console.warn("[Pipeline] OpenClaw WS notify failed:", err); 
-        }
-
-        /*return res.json({
-          session_id:       session.id,
-          status:           "awaiting_confirmation",
-          transcription:    { transcript: transcription.transcript, duration: transcription.duration },
-          extraction,
-          actions,
-          pending_critical: pendingCritical.map(a => ({
-            action_id: a.id,
-            tool:      a.tool,
-            params:    a.params,
-          })),
-          message: `${pendingCritical.length} action(s) require your confirmation before executing.`,
-        });*/
-      }
-
-      // ── Step 5: Delegate Executions to OpenClaw ────────────────────────────
-      console.log(`[Pipeline] ${session.id} — Step 5: OpenClaw Delegation`);
-
-      try {
-        await openclawClient.sendReport("meeting.completed", {
-          session_id: session.id,
-          user_id: session.userId,
-          transcript_summary: extraction.summary,
-          extraction_json: extraction,
-          proposed_actions: actions,
-        });
-      } catch (err) {
-        console.warn("[Pipeline] Failed to notify OpenClaw WS:", err);
-      }
-
-      // 🚨 ADD THIS BLOCK TO ACTUALLY TRIGGER N8N 🚨
-      console.log(`[Pipeline] ${session.id} — Executing MCP Tools via N8N...`);
+      // ── Step 5: Execute non-critical actions immediately ───────────────
+      console.log(`[Pipeline] ${session.id} — Step 5: Executing Actions via N8N...`);
       const results = await mcpDispatcher.executeAll(actions, session.id, apiKeys);
-      
-      let notifications: any[] = []; // handled by OpenClaw now
 
-      // Save completed meeting to PostgreSQL (non-fatal if fails)
+      // Save to database
       try {
         await memoryManager.saveMeeting({
           userId:     user.id,
@@ -286,7 +225,7 @@ app.post(
         console.warn("[Pipeline] Database save failed (non-fatal):", (dbErr as Error).message);
       }
 
-      // Upload audio to Supabase for persistent storage (non-fatal if fails)
+      // Upload audio
       let audioStoragePath: string | null = null;
       try {
         audioStoragePath = await uploadAudioToSupabase(
@@ -298,11 +237,68 @@ app.post(
         console.warn("[Pipeline] Supabase storage failed (non-fatal):", (storageErr as Error).message);
       }
 
+      // ── Step 6: Check for critical actions delaying completion ─────────
+      const pendingCritical = actions.filter(
+        a => a.requiresConfirmation && a.status === "pending"
+      );
+
+      if (pendingCritical.length > 0) {
+        session.status = "awaiting_confirmation";
+        await sessionManager.save(session);
+        console.log(`[Pipeline] ${session.id} — Paused: ${pendingCritical.length} action(s) awaiting confirmation`);
+
+        // Notify OpenClaw (if enabled)
+        try {
+          await openclawClient.sendReport("meeting.awaiting_confirmation", {
+            session_id: session.id,
+            user_id: session.userId,
+            transcript_summary: extraction.summary,
+            extraction_json: extraction,
+            proposed_actions: actions,
+            pending_critical: pendingCritical,
+          });
+        } catch(err) { 
+          console.warn("[Pipeline] OpenClaw WS notify failed:", err); 
+        }
+
+        // =================================================================
+        // TRIGGER NATIVE TELEGRAM CONFIRMATION NOTIFICATION HERE IN THE FUTURE
+        // =================================================================
+
+        return res.json({
+          session_id:       session.id,
+          status:           "awaiting_confirmation",
+          transcription:    { transcript: transcription.transcript, duration: transcription.duration },
+          extraction,
+          actions,
+          results,
+          pending_critical: pendingCritical.map(a => ({
+            action_id: a.id,
+            tool:      a.tool,
+            params:    a.params,
+          })),
+          audio_storage: audioStoragePath ? { path: audioStoragePath, bucket: AUDIO_BUCKET } : null,
+          message: `${pendingCritical.length} action(s) require your confirmation before executing.`,
+        });
+      }
+
+      // ── Step 6 (Alternate): No pending critical, mark as complete ──────
       session.status = "complete";
       await sessionManager.save(session);
 
-      console.log(`[Pipeline] ${session.id} — Complete`);
+      try {
+        await openclawClient.sendReport("meeting.completed", {
+          session_id: session.id,
+          user_id: session.userId,
+          transcript_summary: extraction.summary,
+          extraction_json: extraction,
+          proposed_actions: actions,
+        });
+      } catch (err) {
+        console.warn("[Pipeline] Failed to notify OpenClaw WS:", err);
+      }
 
+      console.log(`[Pipeline] ${session.id} — Complete`);
       return res.json({
         session_id:  session.id,
         status:      "complete",
@@ -314,8 +310,6 @@ app.post(
         extraction,
         actions,
         results,
-        notifications_sent: notifications,
-        
         skill_used:  skill.name,
         audio_storage: audioStoragePath ? { path: audioStoragePath, bucket: AUDIO_BUCKET } : null,
       });

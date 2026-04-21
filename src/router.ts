@@ -10,6 +10,8 @@
  */
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { OpenAI } from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import { z }                  from "zod";
 import { nanoid }             from "nanoid";
 import {
@@ -86,48 +88,75 @@ class IntentRouter implements IIntentRouter {
     userInstructions?: string,
     apiKeys?: any
   ): Promise<IAction[]> {
-    const apiKey = apiKeys?.gemini || process.env.GEMINI_API_KEY;
+    const provider = apiKeys?.Orchestrator?.provider || 'gemini';
+    const apiKey = apiKeys?.Orchestrator?.apiKey || process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error("API key not configured");
-    const genAI = new GoogleGenerativeAI(apiKey);
 
     console.log(
-      `[IntentRouter] Deciding actions for session ${sessionId} — ` +
+      `[IntentRouter] Deciding actions for session ${sessionId} using ${provider.toUpperCase()} — ` +
       `tasks: ${extraction.tasks.length}, ` +
       `prospects: ${extraction.prospects.length}, ` +
       `decisions: ${extraction.decisions.length}`
     );
 
     const startTime = Date.now();
-
-    // Configure Gemini for deterministic routing
-    const model = genAI.getGenerativeModel({
-      model: GEMINI_CONFIG.model,
-      systemInstruction: this.buildSystemPrompt(userInstructions),
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature:      0.0, // Zero creativity — routing must be deterministic
-        maxOutputTokens:  2048,
-      },
-    });
-
+    const systemPrompt = this.buildSystemPrompt(userInstructions);
     const userPrompt = this.buildUserPrompt(extraction, skillContent, userInstructions);
 
     try {
-      // Execute within circuit breaker protection with timeout
-      // Timeout: 60 seconds to prevent indefinite hanging
-      const result = await Promise.race([
-        this.circuitBreaker.execute(async () => {
-          return await model.generateContent(userPrompt);
-        }),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Gemini routing timeout (60s)')), 60_000)
-        )
-      ]) as any;
+      let rawText = "";
 
-      const rawText = result.response.text();
+      const executeGenAI = async () => {
+        if (provider === "openai") {
+          const openai = new OpenAI({ apiKey });
+          const response = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt }
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0.0,
+            max_tokens: 2048,
+          });
+          return response.choices[0].message.content || "{}";
+        } else if (provider === "anthropic" || provider === "claude") {
+          const anthropic = new Anthropic({ apiKey });
+          const response = await anthropic.messages.create({
+            model: "claude-3-5-sonnet-20241022",
+            system: systemPrompt,
+            messages: [{ role: "user", content: userPrompt }],
+            temperature: 0.0,
+            max_tokens: 2048,
+          });
+          return (response.content[0] as any).text || "{}";
+        } else {
+          // Default: Gemini
+          const genAI = new GoogleGenerativeAI(apiKey);
+          const model = genAI.getGenerativeModel({
+            model: GEMINI_CONFIG.model,
+            systemInstruction: systemPrompt,
+            generationConfig: {
+              responseMimeType: "application/json",
+              temperature: 0.0, 
+              maxOutputTokens: 2048,
+            },
+          });
+          const result = await model.generateContent(userPrompt);
+          return result.response.text();
+        }
+      };
+
+      rawText = await Promise.race([
+        this.circuitBreaker.execute(executeGenAI),
+        new Promise<string>((_, reject) => 
+          setTimeout(() => reject(new Error(`${provider} routing timeout (60s)')`)), 60_000)
+        )
+      ]);
+
       const elapsed = Date.now() - startTime;
 
-      // Parse and validate Gemini's decision
+      // Parse and validate provider's decision
       const decisions = this.parseAndValidate(rawText);
 
       // WORKAROUND: Programmatically extract email from all text to guarantee it's set

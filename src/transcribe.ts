@@ -134,8 +134,12 @@ class Transcriber implements ITranscriber {
     language:    string = "fr",
     apiKeys?:    any
   ): Promise<ITranscriptionResult> {
-    const apiKey = apiKeys?.groq || process.env.GROQ_API_KEY;
-    if (!apiKey) throw new Error("API key not configured");
+    const provider = apiKeys?.AudioTranscriber?.provider || 'groq';
+    const apiKey = apiKeys?.AudioTranscriber?.apiKey || process.env.GROQ_API_KEY;
+    if (!apiKey) throw new Error(`${provider} API key not configured`);
+    
+    // We only have the groq sdk setup for audio transcription at this point
+    // A dynamically routed adapter could be created here in the future
     const groq = new Groq({ apiKey, timeout: 10 * 60 * 1000 });
 
     const fileSizeMB = Math.round(audioBuffer.length / 1024 / 1024);

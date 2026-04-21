@@ -6,9 +6,14 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+export interface ServiceConfig {
+  provider: string;
+  apiKey: string;
+}
+
 export interface APIKeys {
-  Orchestrator: string;
-  AudioTranscriber: string;
+  Orchestrator: ServiceConfig;
+  AudioTranscriber: ServiceConfig;
   n8n: string;
 }
 
@@ -40,16 +45,22 @@ export class KeyResolver {
 
       // Priority 1: User's custom key. Priority 2: Backend .env fallback
       return {
-        Orchestrator: userKeys.llm_key || userKeys.gemini_api_key || process.env.GEMINI_API_KEY!,
-        AudioTranscriber: userKeys.stt_key || userKeys.groq_api_key || process.env.GROQ_API_KEY!,
-        n8n: userKeys.n8n_key || userKeys.n8n_api_key || process.env.N8N_API_KEY!,
+        Orchestrator: {
+          provider: userKeys.llm_provider || 'gemini',
+          apiKey: userKeys.llm_key || userKeys.gemini_api_key || process.env.GEMINI_API_KEY!
+        },
+        AudioTranscriber: {
+          provider: userKeys.stt_provider || 'groq',
+          apiKey: userKeys.stt_key || userKeys.groq_api_key || process.env.GROQ_API_KEY!
+        },
+        n8n: userKeys.automation_key || userKeys.n8n_key || userKeys.n8n_api_key || process.env.N8N_API_KEY!,
       };
     } catch (err) {
       console.warn(`[KeyResolver] Failed to fetch custom keys for ${userId}, using defaults.`);
       return {
-        Orchestrator: process.env.GEMINI_API_KEY!,
-        AudioTranscriber:   process.env.GROQ_API_KEY!,
-        n8n:    process.env.N8N_API_KEY!,
+        Orchestrator: { provider: 'gemini', apiKey: process.env.GEMINI_API_KEY! },
+        AudioTranscriber: { provider: 'groq', apiKey: process.env.GROQ_API_KEY! },
+        n8n: process.env.N8N_API_KEY!,
       };
     }
   }

@@ -14,6 +14,8 @@
  */
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { OpenAI } from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import { z }                  from "zod";
 import {
   ITaskExtractor,
@@ -133,66 +135,78 @@ class TaskExtractor implements ITaskExtractor {
     skillContent: string,
     apiKeys?:     any
   ): Promise<INLPOutput> {
-    const apiKey = apiKeys?.gemini || process.env.GEMINI_API_KEY;
+    const provider = apiKeys?.Orchestrator?.provider || 'gemini';
+    const apiKey = apiKeys?.Orchestrator?.apiKey || process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error("API key not configured");
-    const genAI = new GoogleGenerativeAI(apiKey);
 
     console.log(
-      `[TaskExtractor] Starting NLP extraction — ` +
+      `[TaskExtractor] Starting NLP extraction using ${provider.toUpperCase()} — ` +
       `type: ${meetingType}, ` +
       `transcript length: ${transcript.length} chars`
     );
 
     const startTime = Date.now();
-
-    // Build the system prompt (constant across all requests)
     const systemPrompt = this.buildSystemPrompt();
-
-    // Build the user prompt (varies per transcript)
     const userPrompt = this.buildUserPrompt(transcript, meetingType, skillContent);
 
-    // Get model instance with configuration
-    const model = genAI.getGenerativeModel({
-      model: GEMINI_CONFIG.model,  // e.g., "gemini-2.0-flash"
-      systemInstruction: systemPrompt,
-      generationConfig: {
-        // Force JSON output to prevent markdown wrapping (```json...```)
-        responseMimeType: "application/json",
-        
-        // Low temperature for consistent, deterministic extraction
-        // Higher values = more creative/unpredictable output (we don't want that)
-        temperature: GEMINI_CONFIG.temperature,
-        
-        // Usually 500-1500 tokens for extraction results
-        maxOutputTokens: 2048,
-      },
-    });
-
     try {
-      // Call Gemini within circuit breaker protection with timeout
-      // If Gemini API is experiencing repeated failures, the circuit breaker
-      // will reject this call immediately without making an API request
-      // Timeout: 60 seconds to prevent indefinite hanging
-      const result = await Promise.race([
-        this.circuitBreaker.execute(async () => {
-          return await model.generateContent(userPrompt);
-        }),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Gemini extraction timeout (60s)')), 60_000)
-        )
-      ]) as any;
+      let rawText = "";
 
-      const response = result.response;
-      const rawText  = response.text();
+      const executeGenAI = async () => {
+        if (provider === "openai") {
+          const openai = new OpenAI({ apiKey });
+          const response = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt }
+            ],
+            response_format: { type: "json_object" },
+            temperature: GEMINI_CONFIG.temperature,
+            max_tokens: 2048,
+          });
+          return response.choices[0].message.content || "{}";
+        } else if (provider === "anthropic" || provider === "claude") {
+          const anthropic = new Anthropic({ apiKey });
+          const response = await anthropic.messages.create({
+            model: "claude-3-5-sonnet-20241022", // Default to an optimal model
+            system: systemPrompt,
+            messages: [{ role: "user", content: userPrompt }],
+            temperature: GEMINI_CONFIG.temperature,
+            max_tokens: 2048,
+          });
+          // Anthropic types structure requires casting depending on SDK version
+          return (response.content[0] as any).text || "{}";
+        } else {
+          // Default: Gemini
+          const genAI = new GoogleGenerativeAI(apiKey);
+          const model = genAI.getGenerativeModel({
+            model: GEMINI_CONFIG.model,
+            systemInstruction: systemPrompt,
+            generationConfig: {
+              responseMimeType: "application/json",
+              temperature: GEMINI_CONFIG.temperature,
+              maxOutputTokens: 2048,
+            },
+          });
+          const result = await model.generateContent(userPrompt);
+          return result.response.text();
+        }
+      };
+
+      rawText = await Promise.race([
+        this.circuitBreaker.execute(executeGenAI),
+        new Promise<string>((_, reject) => 
+          setTimeout(() => reject(new Error(`${provider} extraction timeout (60s)`)), 60_000)
+        )
+      ]);
 
       console.log(
-        `[TaskExtractor] Gemini responded — ` +
+        `[TaskExtractor] Provider responded (${provider}) — ` +
         `${rawText.length} chars, ` +
         `elapsed: ${Date.now() - startTime}ms`
       );
 
-      // Parse JSON and validate against Zod schema
-      // This catches hallucinations, missing fields, and type mismatches
       const parsed = this.parseAndValidate(rawText, meetingType, skillContent);
 
       console.log(

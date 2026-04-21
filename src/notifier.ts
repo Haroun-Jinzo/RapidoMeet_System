@@ -16,6 +16,9 @@ import {
 } from "./interfaces";
 
 class Notifier implements INotifier {
+  notify(channel: NotificationChannel, message: string, sessionId: string): Promise<INotificationResult> {
+    throw new Error("Method not implemented.");
+  }
 
   // ── USE_OPENCLAW controls which path is taken ─────────────────────────────
   // false = direct API calls (Telegram bot, etc.) — use this for demo tomorrow
@@ -31,7 +34,6 @@ class Notifier implements INotifier {
   // In OpenClaw mode: Sends one consolidated JSON report to the Gateway.
   // In Direct mode: Sends formatted strings to each channel individually.
 
-  async notify(channel: any, report: any, sessionId: any) { return { channel, success: true }; }
   async notifyAll(
     report:    IFormattedReport,
     channels:  NotificationChannel[],
