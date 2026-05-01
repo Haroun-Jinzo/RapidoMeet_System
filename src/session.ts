@@ -28,6 +28,7 @@ class SessionManager implements ISessionManager {
   private isRedisAvailable = false;
 
   constructor() {
+    const redisUrl = process.env.REDIS_URL;
     try {
       // Connect to Redis using the environment variable.
       // ioredis handles reconnection automatically if the connection drops.
@@ -38,6 +39,7 @@ class SessionManager implements ISessionManager {
         maxRetriesPerRequest: 2,
         // Connection timeout
         connectTimeout: 2000,
+        tls: process.env.REDIS_URL?.startsWith('rediss://') ? { rejectUnauthorized: false } : undefined
       });
 
       this.redis.on("connect", () => {

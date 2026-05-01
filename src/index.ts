@@ -165,7 +165,7 @@ app.post(
 
     try {
       // Resolve dynamic API keys based on the user's Supabase vaulted preferences
-      const apiKeys = await KeyResolver.resolveKeys(user);
+      const apiKeys = await KeyResolver.resolveKeys(user.id);
 
       // ── Step 2: Transcribe ───────────────────────────────────────────────
       console.log(`[Pipeline] ${session.id} — Step 1: Transcription`);
@@ -177,7 +177,7 @@ app.post(
       );
       session.transcript = transcription.transcript;
       await sessionManager.save(session);
-
+      console.log("user instruction" + user_instructions);
       // ── Step 3: Detect skill + Extract ──────────────────────────────────
       console.log(`[Pipeline] ${session.id} — Step 2: Skill detection`);
       const skill = skillRegistry.get(meeting_type)

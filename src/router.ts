@@ -159,30 +159,40 @@ class IntentRouter implements IIntentRouter {
       // Parse and validate provider's decision
       const decisions = this.parseAndValidate(rawText);
 
-      // WORKAROUND: Programmatically extract email from all text to guarantee it's set
+      // Extract all email addresses from user instructions + extraction data
       const allTextContext = `${userInstructions || ""} ${JSON.stringify(extraction)}`;
-      const emailMatch = allTextContext.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-      
-      let emailAction = decisions.actions.find(a => a.tool === "email_send_recap");
-      
-      // Force creation if Gemini forgot the action completely
-      if (!emailAction) {
-        emailAction = {
+      const emailMatches = Array.from(
+        new Set((allTextContext.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || []))
+      );
+
+      // Remove any existing email_send_recap actions to avoid stale/duplicate ones
+      decisions.actions = decisions.actions.filter(a => a.tool !== "email_send_recap");
+
+      if (emailMatches.length > 0) {
+        // Create a single email action with a `participants` array and a primary `target_email`
+        decisions.actions.push({
+          tool: "email_send_recap",
+          params: {
+            target_email: emailMatches[0],
+            participants: emailMatches,
+            subject: decisions.summary || "Meeting Recap",
+            message_body: decisions.summary || "Meeting recap is ready.",
+          },
+          requiresConfirmation: false,
+          reason: "Detected recipients from instructions/extraction",
+        });
+      } else {
+        // Fallback single action if no email found
+        decisions.actions.push({
           tool: "email_send_recap",
           params: {
             target_email: "admin@example.com",
-            subject: "Meeting Recap",
-            message_body: decisions.summary || "Meeting recap is ready."
+            subject: decisions.summary || "Meeting Recap",
+            message_body: decisions.summary || "Meeting recap is ready.",
           },
           requiresConfirmation: false,
-          reason: "Fallback created by router"
-        };
-        decisions.actions.push(emailAction);
-      }
-
-      // Overwrite the destination email if we found an email address in any of the texts
-      if (emailMatch) {
-        emailAction.params.target_email = emailMatch[0];
+          reason: "Fallback created by router",
+        });
       }
 
       // Convert decisions to IAction objects with enforced confirmation rules

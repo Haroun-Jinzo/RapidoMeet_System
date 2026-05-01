@@ -8,7 +8,8 @@ export type MeetingType =
   | "tech"         // Sprint reviews, architecture — activates tech.md
   | "retro"        // Team retrospectives — activates retro.md
   | "onboarding"   // New client setup — activates onboarding.md
-  | "general";     // No specific skill — activates general.md
+  | "general"
+  | "phone_call";    // Phone calls — activates phone_call.md
 
 /**
  * How hot a prospect is based on what was said in the meeting.
