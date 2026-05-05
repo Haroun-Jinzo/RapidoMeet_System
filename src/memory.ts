@@ -1,5 +1,5 @@
 ﻿import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import { nanoid }  from "nanoid";
+import * as crypto from "crypto";
 import { IMemoryManager, ISessionContext, IMeetingRecord, ITask } from "./interfaces";
 import { sessionManager } from "./session";
 
@@ -25,7 +25,12 @@ class MemoryManager implements IMemoryManager {
   }
 
   async saveMeeting(meeting: Omit<IMeetingRecord, "id">): Promise<string> {
-    const id = nanoid();
+    const id = crypto.randomUUID();
+    // Ensure duration is an integer to match DB column type (avoid 'invalid input syntax for type integer')
+    const rawDuration = meeting.duration;
+    const parsedDuration = typeof rawDuration === "string" ? parseFloat(rawDuration) : rawDuration;
+    const durationInt = Number.isFinite(parsedDuration as any) ? Math.round(parsedDuration as number) : 0;
+
     const { data, error } = await this.supabase
       .from("meetings")
       .insert({
@@ -37,7 +42,7 @@ class MemoryManager implements IMemoryManager {
         extraction: meeting.extraction,
         actions: meeting.actions,
         created_at: meeting.createdAt instanceof Date ? meeting.createdAt.toISOString() : meeting.createdAt,
-        duration: meeting.duration
+        duration: durationInt
       })
       .select("id").single();
 
@@ -64,7 +69,7 @@ class MemoryManager implements IMemoryManager {
   }
 
   async saveTask(task: ITask & { sessionId: string; userId: string }): Promise<string> {
-    const id = nanoid();
+    const id = crypto.randomUUID();
     const { data, error } = await this.supabase
       .from("tasks")
       .insert({

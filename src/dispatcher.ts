@@ -255,7 +255,7 @@ class MCPDispatcher implements IMCPDispatcher {
           priority: action.params.priority as "high" | "medium" | "low",
           source: (action.params.source as string) || "System Generated",
           sessionId: action.params.sessionId as string || "unknown_session",
-          userId: action.params.userId as string || "anon"
+          userId: action.params.userId as string || "00000000-0000-0000-0000-000000000000"
       });
       return { _mcpStatus: "success", tool: action.tool, content: [{ type: "text", text: `Task safely written to DB with ID ${id}` }] };
     } catch (error) {

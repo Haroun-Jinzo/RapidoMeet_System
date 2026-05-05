@@ -169,18 +169,21 @@ class IntentRouter implements IIntentRouter {
       decisions.actions = decisions.actions.filter(a => a.tool !== "email_send_recap");
 
       if (emailMatches.length > 0) {
-        // Create a single email action with a `participants` array and a primary `target_email`
-        decisions.actions.push({
-          tool: "email_send_recap",
-          params: {
-            target_email: emailMatches[0],
-            participants: emailMatches,
-            subject: decisions.summary || "Meeting Recap",
-            message_body: decisions.summary || "Meeting recap is ready.",
-          },
-          requiresConfirmation: false,
-          reason: "Detected recipients from instructions/extraction",
-        });
+        // Create a separate email_send_recap action for each detected recipient so
+        // downstream workflows that rely on `target_email` (e.g. existing N8N) work as-is.
+        for (const addr of emailMatches) {
+          decisions.actions.push({
+            tool: "email_send_recap",
+            params: {
+              target_email: addr,
+              participants: emailMatches,
+              subject: decisions.summary || "Meeting Recap",
+              message_body: decisions.summary || "Meeting recap is ready.",
+            },
+            requiresConfirmation: false,
+            reason: `Detected recipient ${addr} from instructions/extraction`,
+          });
+        }
       } else {
         // Fallback single action if no email found
         decisions.actions.push({
@@ -339,8 +342,8 @@ ${extraction.prospects.map((p, i) =>
       "params": {
         "summary": "Avril 2026 Event",
         "description": "Event created from meeting",
-        "start_time": "2026-04-01T09:00:00Z",
-        "end_time": "2026-04-01T10:00:00Z"
+        "start": "2026-04-01T09:00:00Z",
+        "end": "2026-04-01T10:00:00Z"
       },
       "requiresConfirmation": false,
       "reason": "Event scheduling mentioned in meeting"

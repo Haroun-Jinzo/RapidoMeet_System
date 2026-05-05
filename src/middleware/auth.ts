@@ -36,15 +36,18 @@ function getKey(header: jwt.JwtHeader, callback: jwt.SigningKeyCallback) {
 export const requireAuth = (req: Request, res: Response, next: NextFunction) => {
   // Allow internal sevice calls
   const internalAuth = req.headers["x-internal-auth"] || req.headers["x-internal-token"];
+  console.log("////////////////////////////////// providedUserId:", req.headers["x-internal-user-id"], "/////////////////////////////////////////");
   if(internalAuth && internalAuth === process.env.INTERNAL_INGEST_SECRET) 
   {
-    (req as any).user = { id: "twilio-internal-service" };
+    const providedUserId = req.headers["x-internal-user-id"] as string;
+    (req as any).user = { id: providedUserId || "00000000-0000-0000-0000-000000000000" };
     return next();
   }
 
   // Allow bypassing auth in development if BYPASS_AUTH is set to "true"
   if (process.env.BYPASS_AUTH === "true") {
-    (req as any).user = { id: "test-user-id" };
+    const bypassUserId = req.headers["x-bypass-user-id"] as string;
+    (req as any).user = { id: bypassUserId || "11111111-1111-1111-1111-111111111111" };
     return next();
   }
 
