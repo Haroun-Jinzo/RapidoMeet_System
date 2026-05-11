@@ -16,7 +16,8 @@
 export const ALWAYS_CRITICAL_TOOLS = new Set([
   'crm_create_contact',
   'crm_create_opportunity',
-  'n8n_trigger_workflow', // depends on workflow, defaulting to critical
+  'n8n_trigger_workflow',
+  'calendar_create_event', // depends on workflow, defaulting to critical
 ]);
 
 /** Safe tools that NEVER require confirmation and can run automatically        
@@ -26,7 +27,7 @@ export const NEVER_CRITICAL_TOOLS = new Set([
   'email_send_recap',
   'crm_log_activity',
   'db_save_task',
-  'calendar_create_event',]);
+  ]);
 // ============================================================================
 
 /** Groq API configuration for speech-to-text transcription */

@@ -150,7 +150,7 @@ async function processRecording(payload: any) {
     const pipelineRes = await fetch(rapidoMeetUrl, {
       method: "POST",
       headers: {
-        "X-Internal-Auth": process.env.INTERNAL_INGEST_SECRET || "",
+        "X-Internal-Auth": process.env.TWILIO_INTERNAL_INGEST_SECRET || "",
       },
       body: form,
     });

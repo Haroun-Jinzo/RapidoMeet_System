@@ -162,6 +162,31 @@ class MCPDispatcher implements IMCPDispatcher {
     //   1. Detecting which actions are still pending
     //   2. Triggering the Confirmation Gate notification
     //   3. Calling resume() after user approval
+    
+    for (const criticalAction of critical) {
+      console.log(`[Dispatcher] Found critical action [${criticalAction.tool}]. Triggering N8N Telegram Bot...`);
+
+      //format the specific parameters for this action so the user knows what they are approving
+      const details = JSON.stringify(criticalAction.params, null, 2);
+
+      //create a synthetic action to trigger the N8N Telegram workflow
+      const telegramAction: IAction = {
+        id: `tg_alert_${Date.now()}`,
+        tool: "telegram_send_confirmation", //This MUST match your N8N MCP Tool name exactly
+        params: {
+          session_id: sessionId,
+          action_id: criticalAction.id, // IMPORTANT: Send the specific Action ID to N8N
+          action_tool: criticalAction.tool,
+          action_description: details,
+          message: `🚨 *Requires Approval*\n\nAction: ${criticalAction.tool}\n\nDetails:\n${details}`
+        },
+        requiresConfirmation: false,
+        status: "pending"
+      }
+
+      const tgResult = await this.execute(telegramAction, apiKeys);
+      results.push(tgResult);
+    }
 
     return results;
   }

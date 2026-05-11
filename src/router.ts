@@ -90,7 +90,7 @@ class IntentRouter implements IIntentRouter {
   ): Promise<IAction[]> {
     const provider = apiKeys?.Orchestrator?.provider || 'gemini';
     const apiKey = apiKeys?.Orchestrator?.apiKey || process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error("API key not configured");
+    if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) //throw new Error(`${provider} API key not configured`);
 
     console.log(
       `[IntentRouter] Deciding actions for session ${sessionId} using ${provider.toUpperCase()} — ` +
@@ -252,6 +252,7 @@ User Instructions: ${userInstructions ? `Apply these instructions strictly! If a
 requiresConfirmation MUST be true for ALWAYS_CRITICAL tools:
 - crm_create_contact (permanent CRM record — irreversible)
 - crm_create_opportunity (financial pipeline entry — irreversible)
+- calendar_create_event (modifies user's calendar schedule - irreversible)
 
 requiresConfirmation MUST be false for NEVER_CRITICAL tools:
 - email_send_recap (always send automatically)
@@ -345,7 +346,7 @@ ${extraction.prospects.map((p, i) =>
         "start": "2026-04-01T09:00:00Z",
         "end": "2026-04-01T10:00:00Z"
       },
-      "requiresConfirmation": false,
+      "requiresConfirmation": true,
       "reason": "Event scheduling mentioned in meeting"
     },
     {

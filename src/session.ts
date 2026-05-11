@@ -15,6 +15,8 @@ import {
   MeetingType,
 } from "./interfaces";
 
+import { KeyResolver } from "./utils/KeyResolver";
+
 // How long a session lives in Redis before auto-deletion.
 // 2 hours is more than enough for any meeting + processing time.
 const SESSION_TTL_SECONDS = 60 * 60 * 2; // 7200 seconds
@@ -63,7 +65,6 @@ class SessionManager implements ISessionManager {
       this.isRedisAvailable = false;
     }
   }
-
   // ── PRIVATE: makeKey ───────────────────────────────────────────────────────
   // Generates the Redis key for a session.
   // Using a prefix "session:" lets us find all sessions easily with SCAN.

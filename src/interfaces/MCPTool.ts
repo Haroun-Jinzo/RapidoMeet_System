@@ -9,7 +9,8 @@ export type MCPTool =
   | "calendar_create_event"   // Creates Google Calendar event
   | "email_send_recap"        // Sends HTML recap email to participants
   | "db_save_task"            // Saves a task to PostgreSQL
-  | "n8n_trigger_workflow";   // Triggers a custom N8N workflow by name
+  | "n8n_trigger_workflow"
+  | "telegram_send_confirmation";   // Triggers a custom N8N workflow by name
 
 /**
  * One atomic action the dispatcher will execute.

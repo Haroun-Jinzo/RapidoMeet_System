@@ -107,6 +107,17 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
 
+// Simple request logger for debugging uploads
+app.use((req, res, next) => {
+  if (req.path === '/upload-meeting') {
+    console.log('[Request] Incoming upload:', req.method, req.path, 'headers:', {
+      'x-internal-auth': req.headers['x-internal-auth'],
+      'x-internal-user-id': req.headers['x-internal-user-id'],
+    });
+  }
+  next();
+});
+
 // Internal routes (OpenClaw -> RapidoMeet via shared secret)
 app.use('/internal', internalRouter);
 
@@ -146,7 +157,7 @@ app.post(
       meeting_type  = "",
       language      = "",
       participants  = "",
-      user_instructions = "", // <-- Extract the new field here
+      user_instructions = "",
     } = req.body;
 
     // ── Step 1: Create session ─────────────────────────────────────────────
@@ -163,180 +174,175 @@ app.post(
 
     await sessionManager.save(session);
 
-    try {
-      // Resolve dynamic API keys based on the user's Supabase vaulted preferences
-      const apiKeys = await KeyResolver.resolveKeys(user.id);
+    // Capture file to avoid undefined issues in async closure
+    const audioFile = req.file;
 
-      // ── Step 2: Transcribe ───────────────────────────────────────────────
-      console.log(`[Pipeline] ${session.id} — Step 1: Transcription`);
-      const transcription = await transcriber.transcribeFile(
-        req.file.buffer,
-        req.file.mimetype,
-        language,
-        apiKeys
-      );
-      session.transcript = transcription.transcript;
-      await sessionManager.save(session);
-      console.log("user instruction" + user_instructions);
-      // ── Step 3: Detect skill + Extract ──────────────────────────────────
-      console.log(`[Pipeline] ${session.id} — Step 2: Skill detection`);
-      const skill = skillRegistry.get(meeting_type)
-        || skillRegistry.detect(transcription.transcript);
+    // ─── Return 202 Accepted immediately ─────────────────────────────────
+    // The bot runner gets confirmation that the request was accepted.
+    console.log(`[Upload] Created session ${session.id} for user ${user.id} - returning 202`);
+    res.status(202).json({
+      session_id: session.id,
+      status: "processing",
+      message: "Meeting upload received and is being processed in the background",
+    });
 
-      console.log(`[Pipeline] ${session.id} — Step 3: NLP extraction`);
-      const extraction = await taskExtractor.extract(
-        transcription.transcript,
-        meeting_type as any,
-        skill.content,
-        apiKeys
-      );
-      session.extraction = extraction;
-      await sessionManager.save(session);
-
-      // ── Step 4: Route — decide actions ──────────────────────────────────
-      console.log(`[Pipeline] ${session.id} — Step 4: Intent routing`);
-      const actions = await intentRouter.decide(
-        extraction,
-        session.id,
-        skill.content,
-        user_instructions,
-        apiKeys
-      );
-      session.actions = actions;
-      await sessionManager.save(session);
-
-      // ── Step 5: Execute non-critical actions immediately ───────────────
-      console.log(`[Pipeline] ${session.id} — Step 5: Executing Actions via N8N...`);
-      const results = await mcpDispatcher.executeAll(actions, session.id, apiKeys);
-
-      // Save to database
+    // ─── Process pipeline asynchronously (fire-and-forget) ───────────────
+    // This ensures the bot runner won't timeout waiting for heavy operations
+    (async () => {
       try {
-        await memoryManager.saveMeeting({
-          userId:     user.id,
-          title:      meeting_title,
-          type:       meeting_type as any,
-          transcript: transcription.transcript,
-          extraction,
-          actions,
-          createdAt:  new Date(),
-          duration:   transcription.duration,
-        });
-      } catch (dbErr) {
-        console.warn("[Pipeline] Database save failed (non-fatal):", (dbErr as Error).message);
-      }
-
-      // Upload audio
-      let audioStoragePath: string | null = null;
-      try {
-        audioStoragePath = await uploadAudioToSupabase(
-          req.file!.buffer,
-          session.id,
-          req.file!.mimetype
+        // Resolve dynamic API keys based on the user's Supabase vaulted preferences
+        const apiKeys = await KeyResolver.resolveKeys(user.id);
+        console.log(
+          "[Pipeline] Key sources:",
+          `orchestrator=${apiKeys.Orchestrator.provider}(len=${apiKeys.Orchestrator.apiKey.length})`,
+          `stt=${apiKeys.AudioTranscriber.provider}(len=${apiKeys.AudioTranscriber.apiKey.length})`,
+          `n8n=${apiKeys.n8n ? `len=${apiKeys.n8n.length}` : "missing"}`
         );
-      } catch (storageErr) {
-        console.warn("[Pipeline] Supabase storage failed (non-fatal):", (storageErr as Error).message);
-      }
-
-      // ── Step 6: Check for critical actions delaying completion ─────────
-      const pendingCritical = actions.filter(
-        a => a.requiresConfirmation && a.status === "pending"
-      );
-
-      if (pendingCritical.length > 0) {
-        session.status = "awaiting_confirmation";
-        await sessionManager.save(session);
-        console.log(`[Pipeline] ${session.id} — Paused: ${pendingCritical.length} action(s) awaiting confirmation`);
-
-        // Notify OpenClaw (if enabled)
-        try {
-          await openclawClient.sendReport("meeting.awaiting_confirmation", {
-            session_id: session.id,
-            user_id: session.userId,
-            transcript_summary: extraction.summary,
-            extraction_json: extraction,
-            proposed_actions: actions,
-            pending_critical: pendingCritical,
-          });
-        } catch(err) { 
-          console.warn("[Pipeline] OpenClaw WS notify failed:", err); 
+        
+        if (!apiKeys || Object.keys(apiKeys).length === 0) {
+          console.warn("[Pipeline] No API keys configured for user:", user.id);
+          session.status = "error";
+          await sessionManager.save(session);
+          return;
         }
 
-        // =================================================================
-        // TRIGGER NATIVE TELEGRAM CONFIRMATION NOTIFICATION HERE IN THE FUTURE
-        // =================================================================
+        // ── Step 2: Transcribe ───────────────────────────────────────────────
+        console.log(`[Pipeline] ${session.id} — Step 1: Transcription`);
+        const transcription = await transcriber.transcribeFile(
+          audioFile.buffer,
+          audioFile.mimetype,
+          language,
+          apiKeys
+        );
+        session.transcript = transcription.transcript;
+        await sessionManager.save(session);
+        console.log("user instruction" + user_instructions);
 
-        return res.json({
-          session_id:       session.id,
-          status:           "awaiting_confirmation",
-          transcription:    { transcript: transcription.transcript, duration: transcription.duration },
+        // ── Step 3: Detect skill + Extract ──────────────────────────────────
+        console.log(`[Pipeline] ${session.id} — Step 2: Skill detection`);
+        const skill = skillRegistry.get(meeting_type)
+          || skillRegistry.detect(transcription.transcript);
+
+        console.log(`[Pipeline] ${session.id} — Step 3: NLP extraction`);
+        const extraction = await taskExtractor.extract(
+          transcription.transcript,
+          meeting_type as any,
+          skill.content,
+          apiKeys
+        );
+        session.extraction = extraction;
+        await sessionManager.save(session);
+
+        // ── Step 4: Route — decide actions ──────────────────────────────────
+        console.log(`[Pipeline] ${session.id} — Step 4: Intent routing`);
+        const actions = await intentRouter.decide(
           extraction,
-          actions,
-          results,
-          pending_critical: pendingCritical.map(a => ({
-            action_id: a.id,
-            tool:      a.tool,
-            params:    a.params,
-          })),
-          audio_storage: audioStoragePath ? { path: audioStoragePath, bucket: AUDIO_BUCKET } : null,
-          message: `${pendingCritical.length} action(s) require your confirmation before executing.`,
+          session.id,
+          skill.content,
+          user_instructions,
+          apiKeys
+        );
+        // INJECT THE REAL USER ID INTO THE AI'S GENERATED ACTIONS
+        actions.forEach(action => {
+          action.params.userId = user.id;
+          action.params.sessionId = session.id;
         });
+        session.actions = actions;
+        await sessionManager.save(session);
+
+        // ── Step 5: Execute non-critical actions immediately ───────────────
+        console.log(`[Pipeline] ${session.id} — Step 5: Executing Actions via N8N...`);
+        const results = await mcpDispatcher.executeAll(actions, session.id, apiKeys);
+
+        // Save to database
+        try {
+          await memoryManager.saveMeeting({
+            userId:     user.id,
+            title:      meeting_title,
+            type:       meeting_type as any,
+            transcript: transcription.transcript,
+            extraction,
+            actions,
+            createdAt:  new Date(),
+            duration:   transcription.duration,
+          });
+        } catch (dbErr) {
+          console.warn("[Pipeline] Database save failed (non-fatal):", (dbErr as Error).message);
+        }
+
+        // Upload audio
+        let audioStoragePath: string | null = null;
+        try {
+          audioStoragePath = await uploadAudioToSupabase(
+            audioFile.buffer,
+            session.id,
+            audioFile.mimetype
+          );
+        } catch (storageErr) {
+          console.warn("[Pipeline] Supabase storage failed (non-fatal):", (storageErr as Error).message);
+        }
+
+        // ── Step 6: Check for critical actions delaying completion ─────────
+        const pendingCritical = actions.filter(
+          a => a.requiresConfirmation && a.status === "pending"
+        );
+
+        if (pendingCritical.length > 0) {
+          session.status = "awaiting_confirmation";
+          await sessionManager.save(session);
+          console.log(`[Pipeline] ${session.id} — Paused: ${pendingCritical.length} action(s) awaiting confirmation`);
+
+          // Notify OpenClaw (if enabled)
+          try {
+            await openclawClient.sendReport("meeting.awaiting_confirmation", {
+              session_id: session.id,
+              user_id: session.userId,
+              transcript_summary: extraction.summary,
+              extraction_json: extraction,
+              proposed_actions: actions,
+              pending_critical: pendingCritical,
+            });
+          } catch(err) { 
+            console.warn("[Pipeline] OpenClaw WS notify failed:", err); 
+          }
+        } else {
+          // ── Step 6 (Alternate): No pending critical, mark as complete ──────
+          session.status = "complete";
+          await sessionManager.save(session);
+
+          try {
+            await openclawClient.sendReport("meeting.completed", {
+              session_id: session.id,
+              user_id: session.userId,
+              transcript_summary: extraction.summary,
+              extraction_json: extraction,
+              proposed_actions: actions,
+            });
+          } catch (err) {
+            console.warn("[Pipeline] Failed to notify OpenClaw WS:", err);
+          }
+
+          console.log(`[Pipeline] ${session.id} — Complete`);
+        }
+
+      } catch (error) {
+        session.status = "error";
+        await sessionManager.save(session);
+        
+        // Extract error message safely
+        let errorMessage = "Unknown error";
+        if (error instanceof Error) {
+          errorMessage = error.message;
+        } else if (typeof error === "string") {
+          errorMessage = error;
+        } else {
+          errorMessage = JSON.stringify(error);
+        }
+        
+        console.error("[Pipeline] Failed:", errorMessage);
+        console.error("[Pipeline] Stack:", error instanceof Error ? error.stack : "N/A");
       }
-
-      // ── Step 6 (Alternate): No pending critical, mark as complete ──────
-      session.status = "complete";
-      await sessionManager.save(session);
-
-      try {
-        await openclawClient.sendReport("meeting.completed", {
-          session_id: session.id,
-          user_id: session.userId,
-          transcript_summary: extraction.summary,
-          extraction_json: extraction,
-          proposed_actions: actions,
-        });
-      } catch (err) {
-        console.warn("[Pipeline] Failed to notify OpenClaw WS:", err);
-      }
-
-      console.log(`[Pipeline] ${session.id} — Complete`);
-      return res.json({
-        session_id:  session.id,
-        status:      "complete",
-        transcription: {
-          transcript: transcription.transcript,
-          duration:   transcription.duration,
-          confidence: transcription.confidence,
-        },
-        extraction,
-        actions,
-        results,
-        skill_used:  skill.name,
-        audio_storage: audioStoragePath ? { path: audioStoragePath, bucket: AUDIO_BUCKET } : null,
-      });
-
-    } catch (error) {
-      session.status = "error";
-      await sessionManager.save(session);
-      
-      // Extract error message safely
-      let errorMessage = "Unknown error";
-      if (error instanceof Error) {
-        errorMessage = error.message;
-      } else if (typeof error === "string") {
-        errorMessage = error;
-      } else {
-        errorMessage = JSON.stringify(error);
-      }
-      
-      console.error("[Pipeline] Failed:", errorMessage);
-      console.error("[Pipeline] Stack:", error instanceof Error ? error.stack : "N/A");
-      
-      return res.status(500).json({
-        session_id: session.id,
-        error:      "Pipeline failed",
-        detail:     errorMessage,
-      });
-    }
+    })(); // Fire-and-forget async IIFE
   }
 );
 

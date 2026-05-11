@@ -27,11 +27,18 @@ async function getDecryptedCredentials(userId: string, integrationId: string): P
       .eq("integration_id", integrationId)
       .single();
 
-    if (error || !data?.credentials) return null;
+    if (error || !data?.credentials) {
+      console.warn(`[KeyResolver] No credentials found in user_connections for integration_id: ${integrationId}`);
+      return null;
+    }
     const creds = data.credentials as any;
+    console.log(`[KeyResolver] Raw DB 'credentials' value for ${integrationId}:`, JSON.stringify(creds, null, 2));
 
     // If credentials were stored directly (legacy), return them
-    if (!creds?.encrypted) return creds;
+    if (!creds?.encrypted) {
+      console.log(`[KeyResolver] No '.encrypted' field found for ${integrationId}. Returning raw creds.`);
+      return creds;
+    }
 
     const encryptedB64: string = creds.encrypted;
     const combined = Buffer.from(encryptedB64, "base64");
@@ -50,9 +57,11 @@ async function getDecryptedCredentials(userId: string, integrationId: string): P
     const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
     decipher.setAuthTag(authTag);
     const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    return JSON.parse(decrypted.toString("utf8"));
+    const parsedCreds = JSON.parse(decrypted.toString("utf8"));
+    console.log(`[KeyResolver] Decrypted ${integrationId} successfully:`, Object.keys(parsedCreds));
+    return parsedCreds;
   } catch (e) {
-    console.warn("[KeyResolver] decrypt error:", e);
+    console.warn(`[KeyResolver] decrypt error for ${integrationId}:`, e);
     return null;
   }
 }
@@ -81,6 +90,18 @@ function summarizeCreds(creds: Record<string, any>): Record<string, string> {
     else out[k] = String(v);
   }
   return out;
+}
+
+function normalizeKey(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function envKey(...values: unknown[]): string {
+  for (const value of values) {
+    const normalized = normalizeKey(value);
+    if (normalized) return normalized;
+  }
+  return "";
 }
 
 // Simple UUID validator to avoid querying Postgres with non-UUID values
@@ -225,11 +246,16 @@ export class KeyResolver {
           console.log(`[KeyResolver] Non-UUID userId \"${userId}\" — using env/service defaults.`);
         }
         return {
-          Orchestrator: { provider: "gemini", apiKey: process.env.GEMINI_API_KEY || "" },
-          AudioTranscriber: { provider: "groq", apiKey: process.env.GROQ_API_KEY || "" },
-          n8n: process.env.N8N_API_KEY || "",
+          Orchestrator: { provider: "gemini", apiKey: envKey(process.env.GEMINI_API_KEY) },
+          AudioTranscriber: { provider: "groq", apiKey: envKey(process.env.GROQ_API_KEY) },
+          n8n: envKey(process.env.N8N_API_KEY),
         };
       }
+      
+      console.log(`[KeyResolver] Checking if user has records in user_connections...`);
+      const { data: dbgData } = await supabase.from("user_connections").select("integration_id").eq("user_id", userId);
+      console.log(`[KeyResolver] user_connections entries for this user:`, dbgData);
+      
       const { data, error } = await supabase
         .from("user_settings")
         .select("settings_value")
@@ -238,26 +264,56 @@ export class KeyResolver {
         .maybeSingle();
 
       if (error) console.warn("[KeyResolver] user_settings query error:", error.message);
-      const userKeys = (data?.settings_value || {}) as Record<string, string>;
+      
+      let userKeys: any = {};
+      if (typeof data?.settings_value === "string") {
+        try {
+          userKeys = JSON.parse(data.settings_value);
+        } catch (e) {
+          console.warn("[KeyResolver] Failed to parse settings_value string");
+        }
+      } else {
+        userKeys = data?.settings_value || {};
+      }
+      
+      console.log("[KeyResolver] Raw userKeys structure:", JSON.stringify(userKeys, null, 2));
 
       // Orchestrator (LLM)
-      const llmProvider = userKeys.llm_provider || "gemini";
+      const llmProvider = userKeys.llm_provider || userKeys.llm?.provider || userKeys.Orchestrator?.provider || "gemini";
+      console.log("////////////////////////llm provider chosen: ", llmProvider);
+
       // Priority 1: explicit llm_key in user_settings
-      let orchestratorKey = userKeys.llm_key
-        || userKeys[`${llmProvider}_api_key`]
-        || userKeys[`${llmProvider}_key`];
+      let orchestratorKey = envKey(
+        userKeys.llm_key,
+        userKeys[`${llmProvider}_api_key`],
+        userKeys[`${llmProvider}_key`],
+        userKeys.llm?.apiKey,
+        userKeys.Orchestrator?.apiKey
+      );
 
       if (!orchestratorKey) {
-        const creds = await getDecryptedCredentials(userId, llmProvider);
+        let creds = await getDecryptedCredentials(userId, llmProvider);
+        if (!creds) {
+           console.log(`[KeyResolver] Fallback: trying to fetch credentials for 'Orchestrator' instead of '${llmProvider}'...`);
+           creds = await getDecryptedCredentials(userId, "Orchestrator");
+        }
+        if (!creds) {
+           console.log(`[KeyResolver] Fallback: trying to fetch credentials for 'openai' instead of '${llmProvider}'...`);
+           creds = await getDecryptedCredentials(userId, "openai");
+        }
+        
         if (creds) {
+          console.log(`[KeyResolver] Found credentials for LLM:`, Object.keys(creds));
           // try common key names
-          orchestratorKey =
-            creds.llm_key ||
-            creds.openai_api_key ||
-            creds.gemini_api_key ||
-            creds.claude_api_key ||
-            creds.api_key ||
-            creds.key;
+          orchestratorKey = envKey(
+            creds.llm_key,
+            creds.openai_api_key,
+            creds.gemini_api_key,
+            creds.claude_api_key,
+            creds.api_key,
+            creds.key,
+            creds.apiKey
+          );
         }
       }
 
@@ -268,24 +324,29 @@ export class KeyResolver {
           gemini: process.env.GEMINI_API_KEY || "",
           claude: process.env.CLAUDE_API_KEY || "",
         };
-        orchestratorKey = envMap[llmProvider] || process.env.GEMINI_API_KEY || "";
+        orchestratorKey = envKey(envMap[llmProvider], process.env.GEMINI_API_KEY);
       }
 
       // AudioTranscriber (STT)
-      const sttProvider = userKeys.stt_provider || "groq";
-      let sttKey = userKeys.stt_key
-        || userKeys[`${sttProvider}_api_key`]
-        || userKeys[`${sttProvider}_key`];
+      const sttProvider = userKeys.stt_provider || userKeys.stt?.provider || userKeys.AudioTranscriber?.provider || "groq";
+      let sttKey = envKey(
+        userKeys.stt_key,
+        userKeys[`${sttProvider}_api_key`],
+        userKeys[`${sttProvider}_key`],
+        userKeys.stt?.apiKey,
+        userKeys.AudioTranscriber?.apiKey
+      );
 
       if (!sttKey) {
         const creds = await getDecryptedCredentials(userId, sttProvider);
         if (creds) {
-          sttKey =
-            creds.stt_key ||
-            creds.deepgram_api_key ||
-            creds.groq_api_key ||
-            creds.api_key ||
-            creds.key;
+          sttKey = envKey(
+            creds.stt_key,
+            creds.deepgram_api_key,
+            creds.groq_api_key,
+            creds.api_key,
+            creds.key
+          );
         }
       }
 
@@ -294,18 +355,28 @@ export class KeyResolver {
           deepgram: process.env.DEEPGRAM_API_KEY || "",
           groq: process.env.GROQ_API_KEY || "",
         };
-        sttKey = envMap[sttProvider] || process.env.GROQ_API_KEY || "";
+        sttKey = envKey(envMap[sttProvider], process.env.GROQ_API_KEY);
       }
 
       // n8n / automation
-      let n8nKey = userKeys.automation_key || userKeys.n8n_key || userKeys.n8n_api_key;
+      let n8nKey = envKey(
+        userKeys.automation_key,
+        userKeys.n8n_key,
+        userKeys.n8n_api_key,
+        userKeys.n8n?.apiKey,
+        userKeys.n8n
+      );
+      if (typeof userKeys.n8n === "object" && userKeys.n8n !== null) {
+        n8nKey = envKey(n8nKey, userKeys.n8n.apiKey, userKeys.n8n.key);
+      }
+      
       if (!n8nKey) {
         const creds = await getDecryptedCredentials(userId, "n8n");
         if (creds) {
-          n8nKey = creds.api_key || creds.n8n_key || creds.key;
+          n8nKey = envKey(creds.api_key, creds.n8n_key, creds.key);
         }
       }
-      if (!n8nKey) n8nKey = process.env.N8N_API_KEY || "";
+      if (!n8nKey) n8nKey = envKey(process.env.N8N_API_KEY);
 
       if (LOG_KEY_RESOLUTION) {
         const llmSummary = orchestratorKey ? `present(len=${(orchestratorKey || "").length})` : "missing";
@@ -314,19 +385,25 @@ export class KeyResolver {
         console.log(
           `[KeyResolver] Resolved keys for user ${userId}: llm=${llmProvider}(${llmSummary}), stt=${sttProvider}(${sttSummary}), n8n=${n8nSummary}`
         );
+
+        // Print masked sample of the keys to aid debugging without leaking secrets
+        const mask = (s?: string) => (s ? `${s.slice(0, 4)}...len=${s.length}` : "<missing>");
+        console.log(
+          `[KeyResolver] Masked keys samples -> llm: ${mask(orchestratorKey)}, stt: ${mask(sttKey)}, n8n: ${mask(n8nKey as string)}`
+        );
       }
 
       return {
-        Orchestrator: { provider: llmProvider, apiKey: orchestratorKey || "" },
-        AudioTranscriber: { provider: sttProvider, apiKey: sttKey || "" },
-        n8n: n8nKey || "",
+        Orchestrator: { provider: llmProvider, apiKey: envKey(orchestratorKey, process.env.GEMINI_API_KEY) },
+        AudioTranscriber: { provider: sttProvider, apiKey: envKey(sttKey, process.env.GROQ_API_KEY) },
+        n8n: envKey(n8nKey, process.env.N8N_API_KEY),
       };
     } catch (err) {
       console.warn(`[KeyResolver] Failed to fetch custom keys for ${userId}, using defaults.`, err);
       return {
-        Orchestrator: { provider: "gemini", apiKey: process.env.GEMINI_API_KEY || "" },
-        AudioTranscriber: { provider: "groq", apiKey: process.env.GROQ_API_KEY || "" },
-        n8n: process.env.N8N_API_KEY || "",
+        Orchestrator: { provider: "gemini", apiKey: envKey(process.env.GEMINI_API_KEY) },
+        AudioTranscriber: { provider: "groq", apiKey: envKey(process.env.GROQ_API_KEY) },
+        n8n: envKey(process.env.N8N_API_KEY),
       };
     }
   }

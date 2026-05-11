@@ -137,8 +137,8 @@ class TaskExtractor implements ITaskExtractor {
   ): Promise<INLPOutput> {
     const provider = apiKeys?.Orchestrator?.provider || 'gemini';
     const apiKey = apiKeys?.Orchestrator?.apiKey || process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error("API key not configured");
-
+    if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) //throw new Error(`${provider} API key not configured`);
+    
     console.log(
       `[TaskExtractor] Starting NLP extraction using ${provider.toUpperCase()} — ` +
       `type: ${meetingType}, ` +

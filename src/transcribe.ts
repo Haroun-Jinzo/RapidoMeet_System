@@ -135,12 +135,16 @@ class Transcriber implements ITranscriber {
     apiKeys?:    any
   ): Promise<ITranscriptionResult> {
     const provider = apiKeys?.AudioTranscriber?.provider || 'groq';
-    const apiKey = apiKeys?.AudioTranscriber?.apiKey || process.env.GROQ_API_KEY;
-    if (!apiKey) throw new Error(`${provider} API key not configured`);
+    const resolvedApiKey = (apiKeys?.AudioTranscriber?.apiKey || process.env.GROQ_API_KEY || "").trim();
+    const apiKeySource = apiKeys?.AudioTranscriber?.apiKey?.trim()
+      ? "user_connections"
+      : process.env.GROQ_API_KEY?.trim()
+        ? "env"
+        : "missing";
     
     // We only have the groq sdk setup for audio transcription at this point
     // A dynamically routed adapter could be created here in the future
-    const groq = new Groq({ apiKey, timeout: 10 * 60 * 1000 });
+    const groq = new Groq({ apiKey: resolvedApiKey || process.env.GROQ_API_KEY || "", timeout: 10 * 60 * 1000 });
 
     const fileSizeMB = Math.round(audioBuffer.length / 1024 / 1024);
     console.log(
@@ -154,6 +158,17 @@ class Transcriber implements ITranscriber {
 
     try {
       fs.writeFileSync(tmpPath, audioBuffer);
+
+      if (!resolvedApiKey) {
+        if (LOCAL_WHISPER_CONFIG.enabled) {
+          console.warn(`[Transcriber] ${provider} key missing (source=${apiKeySource}); using local Whisper fallback instead.`);
+          return await this.transcribeWithLocalWhisper(tmpPath, language);
+        }
+
+        //throw new Error(`${provider} API key not configured`);
+      }
+
+      console.log(`[Transcriber] Using ${provider} key from ${apiKeySource}`);
 
       // ✅ Route to appropriate transcription engine based on file size
       if (LOCAL_WHISPER_CONFIG.enabled && (audioBuffer.length > LOCAL_WHISPER_CONFIG.sizeLimitForLocal || audioBuffer.length > GROQ_CONFIG.maxFileSize)) {
