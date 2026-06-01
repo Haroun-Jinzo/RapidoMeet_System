@@ -308,7 +308,7 @@ class MCPDispatcher implements IMCPDispatcher {
       // 🚨 LOG EXACTLY WHAT N8N SAYS BACK 🚨
       console.log(`[N8N RESPONSE for ${action.tool}]:`, JSON.stringify(result, null, 2));
 
-      // Based on MCP standard, result contains the executable layout payload.
+      // Based on MCP standard, result contains the executable layout payloadss.
       const content = result.content;
       return { _mcpStatus: "success", tool: action.tool, content } as Record<string, unknown>;
     } catch (error) {
