@@ -1,16 +1,28 @@
+import { ALL_CRM_TOOL_NAMES } from "../config/crmTools";
+
+/** Non-CRM MCP tools */
+export const NON_CRM_MCP_TOOLS = [
+  "calendar_create_event",
+  "email_send_recap",
+  "db_save_task",
+  "n8n_trigger_workflow",
+  "telegram_send_confirmation",
+] as const;
+
+export type NonCrmMcpTool = (typeof NON_CRM_MCP_TOOLS)[number];
+
 /**
  * All possible MCP tool calls the dispatcher can execute.
- * These map directly to N8N webhook paths.
+ * CRM tools: crm_{operation}_{resource} — see config/crmTools.ts
  */
 export type MCPTool =
-  | "crm_create_contact"      // Creates a contact in RapidoCRM
-  | "crm_create_opportunity"  // Creates a sales opportunity
-  | "crm_log_activity"        // Logs meeting notes on existing contact
-  | "calendar_create_event"   // Creates Google Calendar event
-  | "email_send_recap"        // Sends HTML recap email to participants
-  | "db_save_task"            // Saves a task to PostgreSQL
-  | "n8n_trigger_workflow"
-  | "telegram_send_confirmation";   // Triggers a custom N8N workflow by name
+  | (typeof ALL_CRM_TOOL_NAMES)[number]
+  | NonCrmMcpTool;
+
+export const ALL_MCP_TOOL_NAMES = [
+  ...ALL_CRM_TOOL_NAMES,
+  ...NON_CRM_MCP_TOOLS,
+] as const;
 
 /**
  * One atomic action the dispatcher will execute.

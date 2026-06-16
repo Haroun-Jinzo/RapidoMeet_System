@@ -1,48 +1,18 @@
 import { Tool } from "@google/generative-ai";
+import { buildCrmGeminiDeclarations } from "../config/crmTools";
+
+const crmDeclarations = buildCrmGeminiDeclarations().map((decl) => ({
+  name: decl.name as string,
+  description: decl.description as string,
+  parameters: decl.parameters as any,
+}));
 
 // Gemini wraps all functions inside a "functionDeclarations" array
 // inside a "tools" array. One tools object, many functions inside it.
 export const GEMINI_TOOLS: Tool[] = [
   {
     functionDeclarations: [
-      {
-        name: "crm_create_contact",
-        description:
-          "Create a new contact in RapidoCRM after a meeting. " +
-          "Use this when a prospect or client was mentioned in a meeting " +
-          "and needs to be added to the CRM system.",
-        parameters: {
-          type: "OBJECT" as any,
-          properties: {
-            first_name: {
-              type: "STRING" as any,
-              description: "Contact first name",
-            },
-            last_name: {
-              type: "STRING" as any,
-              description: "Contact last name",
-            },
-            email: {
-              type: "STRING" as any,
-              description: "Contact email address",
-            },
-            company: {
-              type: "STRING" as any,
-              description: "Company name",
-            },
-            notes: {
-              type: "STRING" as any,
-              description: "Notes from the meeting",
-            },
-            score: {
-              type: "STRING" as any,
-              description: "Prospect score: hot, warm, or cold",
-            },
-          },
-          required: ["first_name", "last_name"],
-        },
-      },
-
+      ...crmDeclarations,
       {
         name: "calendar_create_event",
         description:
@@ -80,7 +50,6 @@ export const GEMINI_TOOLS: Tool[] = [
           required: ["title", "date", "time"],
         },
       },
-
       {
         name: "email_send_recap",
         description:
@@ -115,6 +84,33 @@ export const GEMINI_TOOLS: Tool[] = [
           required: ["meeting_title", "summary"],
         },
       },
-    ],
+      {
+        name: "db_save_task",
+        description: "Save an action item to the local task database.",
+        parameters: {
+          type: "OBJECT" as any,
+          properties: {
+            title:    { type: "STRING" as any, description: "Task title" },
+            assignee: { type: "STRING" as any, description: "Person responsible" },
+            deadline: { type: "STRING" as any, description: "ISO date YYYY-MM-DD" },
+            priority: { type: "STRING" as any, description: "high, medium, or low" },
+            source:   { type: "STRING" as any, description: "Quote from transcript" },
+          },
+          required: ["title"],
+        },
+      },
+      {
+        name: "n8n_trigger_workflow",
+        description: "Trigger a custom n8n automation workflow.",
+        parameters: {
+          type: "OBJECT" as any,
+          properties: {
+            workflow_id: { type: "STRING" as any },
+            payload:     { type: "OBJECT" as any },
+          },
+          required: ["workflow_id"],
+        },
+      },
+    ] as any,
   },
 ];

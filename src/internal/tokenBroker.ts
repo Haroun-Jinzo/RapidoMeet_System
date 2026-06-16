@@ -2,6 +2,8 @@ import { Router } from "express";
 import { requireInternalAuth } from "./internalAuth";
 import { connectionsStore } from "../integrations/ConnectionsStore";
 import { sessionManager } from "../session";
+import { memoryManager } from "../memory";
+import { PendingActionStatus } from "../interfaces";
 
 export const internalRouter = Router();
 
@@ -144,7 +146,8 @@ internalRouter.post("/telegram/sendMessage", async (req, res) => {
 });
 
 /**
- * Callback endpoint for OpenClaw to post execution results back to RapidoMeet.
+ * Callback endpoint for n8n / OpenClaw to post execution results back to RapidoMeet.
+ * Updates Redis session state and pending_actions in Supabase.
  */
 internalRouter.post("/openclaw/session-update", async (req, res) => {
   try {
@@ -159,8 +162,6 @@ internalRouter.post("/openclaw/session-update", async (req, res) => {
       return res.status(404).json({ error: "Session not found" });
     }
 
-    // Attach results to session actions
-    // Expecting results to map: result.action_id or similar.
     let updated = false;
     for (const result of results) {
        const action = session.actions?.find((a: any) => a.id === result.action_id);
@@ -168,18 +169,48 @@ internalRouter.post("/openclaw/session-update", async (req, res) => {
          action.execution_status = result.status;
          action.execution_result = result.output;
          action.updated_at = new Date().toISOString();
+
+         if (result.status === "success" || result.status === "completed") {
+           action.status = "executed";
+         } else if (result.status === "failed") {
+           action.status = "pending";
+         }
+
          updated = true;
+       }
+
+       const pendingStatus: PendingActionStatus =
+         result.status === "success" || result.status === "completed"
+           ? "executed"
+           : result.status === "failed"
+             ? "failed"
+             : "approved";
+
+       try {
+         await memoryManager.updatePendingActionStatus(result.action_id, pendingStatus);
+       } catch (pendingErr) {
+         console.warn(
+           `[Internal] pending_actions update skipped for ${result.action_id}:`,
+           (pendingErr as Error).message
+         );
        }
     }
 
     if (status === 'completed' || status === 'failed') {
       session.status = status;
       updated = true;
+    } else {
+      const stillPending = session.actions?.filter(
+        (a: any) => a.requiresConfirmation && a.status === "pending"
+      ) || [];
+      if (stillPending.length === 0) {
+        session.status = "complete";
+        updated = true;
+      }
     }
 
     if (updated) {
       await sessionManager.save(session);
-      // In a real app we might also write to MemoryManager/PostgreSQL
     }
 
     res.json({ success: true });

@@ -12,10 +12,16 @@ export interface ServiceConfig {
   apiKey: string;
 }
 
+export interface RapidoCRMCredentials {
+  apiKey: string | null;
+  apiUrl: string | null;
+}
+
 export interface APIKeys {
   Orchestrator: ServiceConfig;
   AudioTranscriber: ServiceConfig;
   n8n: string;
+  rapidoCRM: RapidoCRMCredentials;
 }
 
 async function getDecryptedCredentials(userId: string, integrationId: string): Promise<Record<string, any> | null> {
@@ -249,6 +255,10 @@ export class KeyResolver {
           Orchestrator: { provider: "gemini", apiKey: envKey(process.env.GEMINI_API_KEY) },
           AudioTranscriber: { provider: "groq", apiKey: envKey(process.env.GROQ_API_KEY) },
           n8n: envKey(process.env.N8N_API_KEY),
+          rapidoCRM: {
+            apiKey: process.env.RAPIDOCRM_TEST_TOKEN || null,
+            apiUrl: process.env.RAPIDOCRM_API_URL || null,
+          },
         };
       }
       
@@ -378,18 +388,44 @@ export class KeyResolver {
       }
       if (!n8nKey) n8nKey = envKey(process.env.N8N_API_KEY);
 
+      // RapidoCRM — stored via Supabase connections-api in user_connections
+      let rapidoCRMKey = envKey(userKeys.rapidocrm_api_key);
+      let rapidoCRMUrl = envKey(userKeys.rapidocrm_api_url, userKeys.api_url);
+      if (!rapidoCRMKey || !rapidoCRMUrl) {
+        const creds = await getDecryptedCredentials(userId, "rapidocrm");
+        if (creds) {
+          rapidoCRMKey = envKey(
+            rapidoCRMKey,
+            creds.api_key,
+            creds.rapidocrm_api_key,
+            creds.key
+          );
+          rapidoCRMUrl = envKey(
+            rapidoCRMUrl,
+            creds.api_url,
+            creds.rapidocrm_api_url
+          );
+        }
+      }
+      const rapidoCRM = {
+        apiKey: rapidoCRMKey || envKey(process.env.RAPIDOCRM_TEST_TOKEN) || null,
+        apiUrl: rapidoCRMUrl || envKey(process.env.RAPIDOCRM_API_URL) || null,
+      };
+
       if (LOG_KEY_RESOLUTION) {
         const llmSummary = orchestratorKey ? `present(len=${(orchestratorKey || "").length})` : "missing";
         const sttSummary = sttKey ? `present(len=${(sttKey || "").length})` : "missing";
         const n8nSummary = n8nKey ? `present(len=${(n8nKey || "").length})` : "missing";
+        const crmSummary = rapidoCRM.apiKey ? `present(len=${rapidoCRM.apiKey.length})` : "missing";
+        const crmUrlSummary = rapidoCRM.apiUrl ? `present(len=${rapidoCRM.apiUrl.length})` : "missing";
         console.log(
-          `[KeyResolver] Resolved keys for user ${userId}: llm=${llmProvider}(${llmSummary}), stt=${sttProvider}(${sttSummary}), n8n=${n8nSummary}`
+          `[KeyResolver] Resolved keys for user ${userId}: llm=${llmProvider}(${llmSummary}), stt=${sttProvider}(${sttSummary}), n8n=${n8nSummary}, crm=${crmSummary}, crmUrl=${crmUrlSummary}`
         );
 
         // Print masked sample of the keys to aid debugging without leaking secrets
         const mask = (s?: string) => (s ? `${s.slice(0, 4)}...len=${s.length}` : "<missing>");
         console.log(
-          `[KeyResolver] Masked keys samples -> llm: ${mask(orchestratorKey)}, stt: ${mask(sttKey)}, n8n: ${mask(n8nKey as string)}`
+          `[KeyResolver] Masked keys samples -> llm: ${mask(orchestratorKey)}, stt: ${mask(sttKey)}, n8n: ${mask(n8nKey as string)}, crm: ${mask(rapidoCRM.apiKey ?? undefined)}, crmUrl: ${mask(rapidoCRM.apiUrl ?? undefined)}`
         );
       }
 
@@ -397,6 +433,7 @@ export class KeyResolver {
         Orchestrator: { provider: llmProvider, apiKey: envKey(orchestratorKey, process.env.GEMINI_API_KEY) },
         AudioTranscriber: { provider: sttProvider, apiKey: envKey(sttKey, process.env.GROQ_API_KEY) },
         n8n: envKey(n8nKey, process.env.N8N_API_KEY),
+        rapidoCRM,
       };
     } catch (err) {
       console.warn(`[KeyResolver] Failed to fetch custom keys for ${userId}, using defaults.`, err);
@@ -404,6 +441,10 @@ export class KeyResolver {
         Orchestrator: { provider: "gemini", apiKey: envKey(process.env.GEMINI_API_KEY) },
         AudioTranscriber: { provider: "groq", apiKey: envKey(process.env.GROQ_API_KEY) },
         n8n: envKey(process.env.N8N_API_KEY),
+        rapidoCRM: {
+          apiKey: process.env.RAPIDOCRM_TEST_TOKEN || null,
+          apiUrl: process.env.RAPIDOCRM_API_URL || null,
+        },
       };
     }
   }

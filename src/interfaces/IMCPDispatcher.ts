@@ -22,7 +22,8 @@ export interface IMCPDispatcher {
   executeAll(
     actions:   IAction[],
     sessionId: string,
-    apiKeys?:  any
+    apiKeys?:  any,
+    context?:  { userId: string }
   ): Promise<IDispatchResult[]>;
 
   /**

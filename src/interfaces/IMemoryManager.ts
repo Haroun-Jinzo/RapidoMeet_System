@@ -1,6 +1,7 @@
 import { ISessionContext } from "./ISessionContext";
 import { ITask } from "./ITask";
 import { IMeetingRecord } from "./IMeetingRecord";
+import { IPendingAction, IPendingActionInsert, PendingActionStatus } from "./IPendingAction";
 
 /**
  * C4 Component: Memory Manager
@@ -65,6 +66,20 @@ export interface IMemoryManager {
 
   /** Mark a task as completed in the database. */
   markTaskDone(taskId: string): Promise<void>;
+
+  // ── Pending actions (Supabase — n8n approval flow) ───────────────────
+
+  /** Persist a critical action awaiting Telegram / n8n approval. */
+  savePendingAction(action: IPendingActionInsert): Promise<void>;
+
+  /** Update status after user decision or n8n execution callback. */
+  updatePendingActionStatus(
+    actionId: string,
+    status: PendingActionStatus
+  ): Promise<void>;
+
+  /** Lookup a pending action by action_id (used by internal callbacks). */
+  getPendingAction(actionId: string): Promise<IPendingAction | null>;
 }
 
 // SECTION 8 — FORMATTER (formatter.ts)

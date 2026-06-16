@@ -1,6 +1,6 @@
 ﻿import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import * as crypto from "crypto";
-import { IMemoryManager, ISessionContext, IMeetingRecord, ITask } from "./interfaces";
+import { IMemoryManager, ISessionContext, IMeetingRecord, ITask, IPendingAction, IPendingActionInsert, PendingActionStatus } from "./interfaces";
 import { sessionManager } from "./session";
 
 class MemoryManager implements IMemoryManager {
@@ -97,6 +97,112 @@ class MemoryManager implements IMemoryManager {
   async markTaskDone(taskId: string): Promise<void> {
     await this.supabase.from("tasks").update({ done: true }).eq("id", taskId);
     console.log("[Memory] Task done: " + taskId);
+  }
+
+  private mapPendingActionRow(data: Record<string, unknown>): IPendingAction {
+    const payload = (data.payload && typeof data.payload === "object"
+      ? data.payload
+      : {}) as Record<string, unknown>;
+    const metadata = (data.metadata && typeof data.metadata === "object"
+      ? data.metadata
+      : {}) as Record<string, unknown>;
+
+    const params = (payload.params && typeof payload.params === "object"
+      ? payload.params
+      : payload) as Record<string, unknown>;
+
+    return {
+      id:          data.id as string | undefined,
+      action_id:   (payload.action_id ?? metadata.action_id ?? "") as string,
+      session_id:  (payload.session_id ?? metadata.session_id ?? "") as string,
+      user_id:     (data.user_id ?? "") as string,
+      action_tool: (data.action_type ?? "") as string,
+      params,
+      status:      data.status as IPendingAction["status"],
+      created_at:  data.created_at as string | undefined,
+    };
+  }
+
+  private buildPendingActionRow(action: IPendingActionInsert) {
+    const payload = {
+      action_id:  action.actionId,
+      session_id: action.sessionId,
+      params:     action.params,
+    };
+
+    return {
+      action_type: action.actionTool,
+      payload,
+      status:      action.status ?? "pending",
+      metadata: {
+        action_id:  action.actionId,
+        session_id: action.sessionId,
+      },
+      user_id: action.userId,
+    };
+  }
+
+  async savePendingAction(action: IPendingActionInsert): Promise<void> {
+    const row = this.buildPendingActionRow(action);
+    const existing = await this.getPendingAction(action.actionId);
+
+    if (existing?.id) {
+      const { error } = await this.supabase
+        .from("pending_actions")
+        .update(row)
+        .eq("id", existing.id);
+
+      if (error) {
+        throw new Error("[Memory] Pending action update error: " + error.message);
+      }
+    } else {
+      const { error } = await this.supabase
+        .from("pending_actions")
+        .insert({ id: crypto.randomUUID(), ...row });
+
+      if (error) {
+        throw new Error("[Memory] Pending action insert error: " + error.message);
+      }
+    }
+
+    console.log(`[Memory] Pending action saved: ${action.actionId} (${action.actionTool})`);
+  }
+
+  async updatePendingActionStatus(
+    actionId: string,
+    status: PendingActionStatus
+  ): Promise<void> {
+    const existing = await this.getPendingAction(actionId);
+    if (!existing?.id) {
+      throw new Error(`[Memory] Pending action not found for action_id: ${actionId}`);
+    }
+
+    const { error } = await this.supabase
+      .from("pending_actions")
+      .update({ status })
+      .eq("id", existing.id);
+
+    if (error) {
+      throw new Error("[Memory] Pending action update error: " + error.message);
+    }
+
+    console.log(`[Memory] Pending action ${actionId} → ${status}`);
+  }
+
+  async getPendingAction(actionId: string): Promise<IPendingAction | null> {
+    const { data, error } = await this.supabase
+      .from("pending_actions")
+      .select("*")
+      .contains("metadata", { action_id: actionId })
+      .maybeSingle();
+
+    if (error) {
+      console.warn("[Memory] Pending action lookup error:", error.message);
+      return null;
+    }
+
+    if (!data) return null;
+    return this.mapPendingActionRow(data);
   }
 
   async disconnect(): Promise<void> { }

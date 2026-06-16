@@ -25,7 +25,6 @@ import { reportFormatter } from "./formatter";
 import { requireAuth } from "./middleware/auth";
 import { internalRouter } from "./internal/tokenBroker";
 import { openclawClient } from "./openclaw/OpenClawClient";
-
 import multer from "multer";
 
 type AudioUploadRequest = Omit<Request, "file"> & {
@@ -252,7 +251,9 @@ app.post(
 
         // ── Step 5: Execute non-critical actions immediately ───────────────
         console.log(`[Pipeline] ${session.id} — Step 5: Executing Actions via N8N...`);
-        const results = await mcpDispatcher.executeAll(actions, session.id, apiKeys);
+        const results = await mcpDispatcher.executeAll(actions, session.id, apiKeys, {
+          userId: user.id,
+        });
 
         // Save to database
         try {
@@ -373,12 +374,16 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
   if (!action) return res.status(404).json({ error: 'Action not found' });
 
   action.status = decision === 'confirm' ? 'confirmed' : 'refused';
-  console.log(`[Gate] Action ${action_id} ${action.status.toUpperCase()}`);
+  console.log(`[Gate] Action ${action_id} ${action.status.toUpperCase()} (n8n executes CRM after Telegram approval)`);
 
-  if (decision === 'confirm') {
-    // Inject BYOK API keys into the dispatcher 
-    const apiKeys = await KeyResolver.resolveKeys(session.userId);
-    await mcpDispatcher.resume(action, session_id, apiKeys);
+  // Sync pending_actions — execution is owned by n8n approval workflows, not resume().
+  try {
+    await memoryManager.updatePendingActionStatus(
+      action_id,
+      decision === 'confirm' ? 'approved' : 'refused'
+    );
+  } catch (err) {
+    console.warn(`[Gate] pending_actions update failed for ${action_id}:`, (err as Error).message);
   }
 
   const stillPending = session.actions?.filter(

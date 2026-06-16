@@ -27,3 +27,4 @@ export * from "./INotifier";
 export * from "./ISkill";
 export * from "./ISkillRegistry";
 export * from "./IPipelineResult";
+export * from "./IPendingAction";

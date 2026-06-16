@@ -23,26 +23,23 @@ import {
 } from "./interfaces";
 import { CircuitBreaker } from "./resilience/CircuitBreaker";
 import {
-  ALWAYS_CRITICAL_TOOLS,
-  NEVER_CRITICAL_TOOLS,
+  requiresConfirmationForTool,
   GEMINI_CONFIG,
   CIRCUIT_BREAKER_CONFIG,
 } from "./config/services";
+import { buildCrmToolsPromptTable, crmToolSortIndex } from "./config/crmTools";
+import { ALL_MCP_TOOL_NAMES } from "./interfaces/MCPTool";
 
 // ============================================================================
 // Zod Validation Schemas
 // ============================================================================
 
+const ROUTABLE_TOOLS = ALL_MCP_TOOL_NAMES.filter(
+  (t) => t !== "telegram_send_confirmation"
+);
+
 const ActionDecisionSchema = z.object({
-  tool: z.enum([
-    "crm_create_contact",
-    "crm_create_opportunity",
-    "crm_log_activity",
-    "calendar_create_event",
-    "email_send_recap",
-    "db_save_task",
-    "n8n_trigger_workflow",
-  ] as const),
+  tool: z.enum(ROUTABLE_TOOLS as unknown as [string, ...string[]]),
   params:               z.record(z.string(), z.unknown()),
   requiresConfirmation: z.boolean(),
   reason:               z.string(),
@@ -239,36 +236,36 @@ User Instructions: ${userInstructions ? `Apply these instructions strictly! If a
 
 | Tool | What it does | Risk level |
 |------|-------------|------------|
-| crm_create_contact | Creates a new permanent contact in RapidoCRM | HIGH — irreversible |
-| crm_create_opportunity | Creates a sales opportunity in RapidoCRM | HIGH — irreversible |
-| crm_log_activity | Logs a note on an existing CRM contact | LOW — append only |
-| calendar_create_event | Creates a Google Calendar event | LOW — easily deleted |
+${buildCrmToolsPromptTable()}
+| calendar_create_event | Creates a Google Calendar event | HIGH — irreversible |
 | email_send_recap | Sends the meeting recap email to participants | LOW — informational |
 | db_save_task | Saves an action item to the task database | LOW — easily deleted |
 | n8n_trigger_workflow | Triggers a custom N8N automation workflow | MEDIUM — depends on workflow |
 
 ## Confirmation Gate Rules
 
-requiresConfirmation MUST be true for ALWAYS_CRITICAL tools:
-- crm_create_contact (permanent CRM record — irreversible)
-- crm_create_opportunity (financial pipeline entry — irreversible)
-- calendar_create_event (modifies user's calendar schedule - irreversible)
+requiresConfirmation MUST be true for:
+- All crm_create_*, crm_update_*, crm_delete_* tools (permanent CRM mutations)
+- crm_create_opportunity
+- calendar_create_event
 
-requiresConfirmation MUST be false for NEVER_CRITICAL tools:
-- email_send_recap (always send automatically)
-- db_save_task (always save automatically)
-- crm_log_activity (append only, safe)
+requiresConfirmation MUST be false for:
+- All crm_read_* tools (read-only)
+- email_send_recap, db_save_task, crm_log_activity
 
 ## Decision Rules
 
 1. Create one db_save_task for each task in extraction
-2. Create one crm_create_contact for each new prospect
-3. Create calendar_create_event if a task or decision mentions scheduling a meeting, a call, or an event in the future.
-4. Always create email_send_recap at end (last action). For "target_email", you MUST extract the actual email address provided by the user in the Instructions above. If no email is found, or if instructions are empty, fallback to "admin@example.com". NEVER output null or placeholder text.
-5. In your Output Format, replace all example values (like "user@example.com" or "Thomas") with the real data extracted from the meeting and instructions.
-5. Only create crm_log_activity if CRM contact exists
-6. Don't create actions for vague/uncertain information
-7. Keep params concise — only use explicit information
+2. Create one crm_create_contact for each new prospect (or crm_create_enterprise if a new company is discussed)
+3. Use crm_update_* only when modifying an existing record with a known ID
+4. Use crm_delete_* only when the user explicitly requests deletion
+5. Use crm_read_* only when information from CRM is needed to complete another action
+6. Create calendar_create_event if a task or decision mentions scheduling a meeting, a call, or an event in the future.
+7. Always create email_send_recap at end (last action). For "target_email", you MUST extract the actual email address provided by the user in the Instructions above. If no email is found, or if instructions are empty, fallback to "admin@example.com". NEVER output null or placeholder text.
+8. In your Output Format, replace all example values with real data extracted from the meeting and instructions.
+9. Only create crm_log_activity if CRM contact exists
+10. Don't create actions for vague/uncertain information
+11. Keep params concise — only use explicit information
 
 Return ONLY valid JSON object.
 `.trim();
@@ -422,12 +419,10 @@ Return ONLY the JSON object.
     const actions: IAction[] = output.actions.map(decision => {
       let requiresConfirmation = decision.requiresConfirmation;
 
-      // Enforce confirmation rules
-      if (ALWAYS_CRITICAL_TOOLS.has(decision.tool as MCPTool)) {
-        requiresConfirmation = true;  // Force approval for high-risk
-      } else if (NEVER_CRITICAL_TOOLS.has(decision.tool as MCPTool)) {
-        requiresConfirmation = false; // Force auto-execution for safe
-      }
+      requiresConfirmation = requiresConfirmationForTool(
+        decision.tool,
+        decision.requiresConfirmation
+      );
 
       return {
         id:                   `action_${nanoid(8)}`,
@@ -438,21 +433,19 @@ Return ONLY the JSON object.
       };
     });
 
-    // Sort by tool priority
-    const toolOrder: MCPTool[] = [
-      "crm_create_contact",
-      "crm_create_opportunity",
+    const nonCrmOrder: MCPTool[] = [
       "calendar_create_event",
-      "crm_log_activity",
       "n8n_trigger_workflow",
       "db_save_task",
-      "email_send_recap",  // Always last
+      "email_send_recap",
     ];
 
     return actions.sort((a, b) => {
-      const ai = toolOrder.indexOf(a.tool);
-      const bi = toolOrder.indexOf(b.tool);
-      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+      const ai = a.tool.startsWith("crm_") ? crmToolSortIndex(a.tool) : nonCrmOrder.indexOf(a.tool);
+      const bi = b.tool.startsWith("crm_") ? crmToolSortIndex(b.tool) : nonCrmOrder.indexOf(b.tool);
+      const aIdx = ai === -1 ? 900 : ai;
+      const bIdx = bi === -1 ? 900 : bi;
+      return aIdx - bIdx;
     });
   }
 }

@@ -6,28 +6,33 @@
  * we make it easy to modify settings without touching business logic.
  */
 
-// ============================================================================
+import { isCrmCriticalTool, isCrmReadTool } from "./crmTools";
 
 // ============================================================================
 
-/** Critical tools that ALWAYS require user confirmation before execution
- * These tools modify sensitive data and should never run automatically
- */
-export const ALWAYS_CRITICAL_TOOLS = new Set([
-  'crm_create_contact',
-  'crm_create_opportunity',
-  'n8n_trigger_workflow',
-  'calendar_create_event', // depends on workflow, defaulting to critical
+// ============================================================================
+
+/** Critical tools that ALWAYS require user confirmation before execution */
+export const ALWAYS_CRITICAL_TOOLS = new Set<string>([
+  "n8n_trigger_workflow",
+  "calendar_create_event",
 ]);
 
-/** Safe tools that NEVER require confirmation and can run automatically        
- * These tools are read-only or informational with no side effects
- */
-export const NEVER_CRITICAL_TOOLS = new Set([
-  'email_send_recap',
-  'crm_log_activity',
-  'db_save_task',
-  ]);
+/** Safe tools that NEVER require confirmation and can run automatically */
+export const NEVER_CRITICAL_TOOLS = new Set<string>([
+  "email_send_recap",
+  "db_save_task",
+  "crm_log_activity",
+]);
+
+/** Classify CRM tools dynamically (create/update/delete = critical, read = safe) */
+export function requiresConfirmationForTool(tool: string, geminiSays?: boolean): boolean {
+  if (isCrmCriticalTool(tool)) return true;
+  if (isCrmReadTool(tool)) return false;
+  if (ALWAYS_CRITICAL_TOOLS.has(tool)) return true;
+  if (NEVER_CRITICAL_TOOLS.has(tool)) return false;
+  return geminiSays ?? false;
+}
 // ============================================================================
 
 /** Groq API configuration for speech-to-text transcription */
