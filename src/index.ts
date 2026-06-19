@@ -26,6 +26,8 @@ import { requireAuth } from "./middleware/auth";
 import { internalRouter } from "./internal/tokenBroker";
 import { openclawClient } from "./openclaw/OpenClawClient";
 import multer from "multer";
+import { progressBus } from "./progress/ProgressBus";
+import { streamSessionProgress } from "./progress/sse";
 
 type AudioUploadRequest = Omit<Request, "file"> & {
   file?: {
@@ -173,6 +175,14 @@ app.post(
 
     await sessionManager.save(session);
 
+    progressBus.emit({
+      sessionId: session.id,
+      step: "started",
+      message: "Meeting upload received — starting processing",
+      progress: 0,
+      detail: `Session ${session.id}`,
+    });
+
     // Capture file to avoid undefined issues in async closure
     const audioFile = req.file;
 
@@ -202,6 +212,13 @@ app.post(
           console.warn("[Pipeline] No API keys configured for user:", user.id);
           session.status = "error";
           await sessionManager.save(session);
+          progressBus.emit({
+            sessionId: session.id,
+            step: "error",
+            message: "Processing failed — API keys are not configured",
+            progress: 0,
+            error: "No API keys configured for this user",
+          });
           return;
         }
 
@@ -215,12 +232,26 @@ app.post(
         );
         session.transcript = transcription.transcript;
         await sessionManager.save(session);
+        progressBus.emit({
+          sessionId: session.id,
+          step: "transcription",
+          message: "Audio transcribed successfully",
+          progress: 25,
+          detail: `${transcription.transcript.length} characters, ${Math.round(transcription.duration)}s audio`,
+        });
         console.log("user instruction" + user_instructions);
 
         // ── Step 3: Detect skill + Extract ──────────────────────────────────
         console.log(`[Pipeline] ${session.id} — Step 2: Skill detection`);
         const skill = skillRegistry.get(meeting_type)
           || skillRegistry.detect(transcription.transcript);
+        progressBus.emit({
+          sessionId: session.id,
+          step: "skill_detection",
+          message: `Skill detected: ${skill.name}`,
+          progress: 35,
+          detail: skill.name,
+        });
 
         console.log(`[Pipeline] ${session.id} — Step 3: NLP extraction`);
         const extraction = await taskExtractor.extract(
@@ -231,6 +262,13 @@ app.post(
         );
         session.extraction = extraction;
         await sessionManager.save(session);
+        progressBus.emit({
+          sessionId: session.id,
+          step: "extraction",
+          message: "Meeting content extracted",
+          progress: 55,
+          detail: `${extraction.tasks.length} tasks, ${extraction.decisions.length} decisions, ${extraction.prospects.length} prospects`,
+        });
 
         // ── Step 4: Route — decide actions ──────────────────────────────────
         console.log(`[Pipeline] ${session.id} — Step 4: Intent routing`);
@@ -241,6 +279,13 @@ app.post(
           user_instructions,
           apiKeys
         );
+        progressBus.emit({
+          sessionId: session.id,
+          step: "routing",
+          message: `${actions.length} action${actions.length === 1 ? "" : "s"} planned`,
+          progress: 65,
+          detail: actions.map((a) => a.tool).join(", "),
+        });
         // INJECT THE REAL USER ID INTO THE AI'S GENERATED ACTIONS
         actions.forEach(action => {
           action.params.userId = user.id;
@@ -292,6 +337,13 @@ app.post(
           session.status = "awaiting_confirmation";
           await sessionManager.save(session);
           console.log(`[Pipeline] ${session.id} — Paused: ${pendingCritical.length} action(s) awaiting confirmation`);
+          progressBus.emit({
+            sessionId: session.id,
+            step: "confirmation",
+            message: `${pendingCritical.length} action${pendingCritical.length === 1 ? "" : "s"} waiting for your approval`,
+            progress: 95,
+            detail: pendingCritical.map((a) => a.tool).join(", "),
+          });
 
           // Notify OpenClaw (if enabled)
           try {
@@ -324,6 +376,13 @@ app.post(
           }
 
           console.log(`[Pipeline] ${session.id} — Complete`);
+          progressBus.emit({
+            sessionId: session.id,
+            step: "complete",
+            message: "Meeting processing complete",
+            progress: 100,
+            detail: `${actions.length} actions processed`,
+          });
         }
 
       } catch (error) {
@@ -339,6 +398,15 @@ app.post(
         } else {
           errorMessage = JSON.stringify(error);
         }
+
+        progressBus.emit({
+          sessionId: session.id,
+          step: "error",
+          message: "Meeting processing failed",
+          progress: 0,
+          error: errorMessage,
+          detail: error instanceof Error ? error.stack : undefined,
+        });
         
         console.error("[Pipeline] Failed:", errorMessage);
         console.error("[Pipeline] Stack:", error instanceof Error ? error.stack : "N/A");
@@ -346,6 +414,26 @@ app.post(
     })(); // Fire-and-forget async IIFE
   }
 );
+
+// ──────────────────────────────────────────────────────────────────────
+// GET /sessions/:id/progress
+// Server-Sent Events stream of live pipeline progress for a session.
+// ──────────────────────────────────────────────────────────────────────
+app.get("/sessions/:id/progress", authMiddleware, async (req: Request, res: Response) => {
+  const sessionId = req.params.id as string;
+  const user = (req as any).user;
+  const session = await sessionManager.load(sessionId);
+
+  if (!session) {
+    return res.status(404).json({ error: "Session not found or expired" });
+  }
+
+  if (session.userId !== user.id) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  streamSessionProgress(req, res, sessionId);
+});
 
 // ──────────────────────────────────────────────────────────────────────
 // POST /sessions/:id/actions/:actionId/confirm
@@ -392,6 +480,12 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
 
   if (stillPending.length === 0) {
     session.status = 'complete';
+    progressBus.emit({
+      sessionId: session_id,
+      step: 'complete',
+      message: 'All actions approved — meeting processing complete',
+      progress: 100,
+    });
   }
 
   await sessionManager.save(session);

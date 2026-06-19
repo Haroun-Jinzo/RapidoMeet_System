@@ -18,6 +18,7 @@ import {
 import { memoryManager } from "./memory";
 import { APIKeys } from "./utils/KeyResolver";
 import { isCrmTool, getCrmRouteConfig } from "./config/crmTools";
+import { progressBus, actionProgressPercent } from "./progress/ProgressBus";
 
 function enrichCrmParams(
   params: Record<string, unknown>,
@@ -120,10 +121,39 @@ class MCPDispatcher implements IMCPDispatcher {
       `${critical.length} pending confirmation`
     );
 
+    const totalActions = actions.length;
+    let actionIndex = 0;
+
+    const emitActionProgress = (
+      tool: string,
+      success: boolean,
+      detail?: string,
+      error?: string
+    ) => {
+      progressBus.emit({
+        sessionId,
+        step: "action",
+        message: success
+          ? `Completed: ${tool.replace(/_/g, " ")}`
+          : `Failed: ${tool.replace(/_/g, " ")}`,
+        progress: actionProgressPercent(actionIndex, totalActions),
+        detail,
+        error,
+      });
+      actionIndex += 1;
+    };
+
     for (const action of nonCritical) {
       console.log(`[Dispatcher] Executing: ${action.tool}`);
       const result = await this.execute(action, apiKeys);
       results.push(result);
+
+      emitActionProgress(
+        action.tool,
+        result.success,
+        result.success ? undefined : result.error,
+        result.success ? undefined : result.error
+      );
 
       if (!result.success) {
         console.error(
@@ -210,6 +240,15 @@ class MCPDispatcher implements IMCPDispatcher {
 
       const tgResult = await this.execute(telegramAction, apiKeys);
       results.push(tgResult);
+
+      emitActionProgress(
+        criticalAction.tool,
+        tgResult.success,
+        tgResult.success
+          ? "Awaiting your approval via Telegram"
+          : tgResult.error,
+        tgResult.success ? undefined : tgResult.error
+      );
 
       if (tgResult.success) {
         criticalAction.status = "pending";

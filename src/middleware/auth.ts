@@ -33,12 +33,52 @@ function getKey(header: jwt.JwtHeader, callback: jwt.SigningKeyCallback) {
   });
 }
 
+/**
+ * Accept JWT from Authorization header or query string (for EventSource / SSE).
+ * EventSource cannot send custom headers — clients may use ?token= or ?access_token=
+ */
+function extractBearerToken(req: Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith("Bearer ")) {
+    return authHeader.replace(/^Bearer\s+/i, "").trim();
+  }
+
+  const fromQuery = req.query.token ?? req.query.access_token;
+  if (typeof fromQuery === "string" && fromQuery.trim()) {
+    return fromQuery.trim();
+  }
+  if (Array.isArray(fromQuery) && typeof fromQuery[0] === "string" && fromQuery[0].trim()) {
+    return fromQuery[0].trim();
+  }
+
+  return null;
+}
+
+function getVerifyOptions(): jwt.VerifyOptions {
+  const verifyOptions: jwt.VerifyOptions = {
+    audience: process.env.JWT_AUDIENCE || "authenticated",
+  };
+
+  if (process.env.JWT_ISSUER) {
+    verifyOptions.issuer = process.env.JWT_ISSUER;
+  } else if (process.env.SUPABASE_URL) {
+    verifyOptions.issuer = `${process.env.SUPABASE_URL.replace(/\/$/, "")}/auth/v1`;
+  }
+
+  return verifyOptions;
+}
+
+function attachUser(req: Request, decoded: { sub: string; [key: string]: unknown }): void {
+  (req as any).user = {
+    id: decoded.sub,
+    ...decoded,
+  };
+}
+
 export const requireAuth = (req: Request, res: Response, next: NextFunction) => {
-  // Allow internal sevice calls
+  // Allow internal service calls
   const internalAuth = req.headers["x-internal-auth"] || req.headers["x-internal-token"];
-  console.log("////////////////////////////////// providedUserId:", req.headers["x-internal-user-id"], "/////////////////////////////////////////");
-  if(internalAuth && internalAuth === process.env.INTERNAL_INGEST_SECRET) 
-  {
+  if (internalAuth && internalAuth === process.env.INTERNAL_INGEST_SECRET) {
     const providedUserId = req.headers["x-internal-user-id"] as string;
     (req as any).user = { id: providedUserId || "00000000-0000-0000-0000-000000000000" };
     return next();
@@ -51,29 +91,23 @@ export const requireAuth = (req: Request, res: Response, next: NextFunction) => 
     return next();
   }
 
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader?.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Missing or invalid authorization header" });
+  const token = extractBearerToken(req);
+  if (!token) {
+    return res.status(401).json({ error: "Missing or invalid authorization" });
   }
 
-  const token = authHeader.split(" ")[1];
+  const verifyOptions = getVerifyOptions();
 
-  const verifyOptions: jwt.VerifyOptions = {
-    // Optional checks depending on requirements check the env, fallback strings
-    audience: process.env.JWT_AUDIENCE || "authenticated",
-  };
-  
-  if (process.env.JWT_ISSUER) verifyOptions.issuer = process.env.JWT_ISSUER;
-  else if (process.env.SUPABASE_URL) verifyOptions.issuer = `${process.env.SUPABASE_URL.replace(/\/$/, "")}/auth/v1`;
-
-  // Provide fallback to secret if JWKS is not reachable or wanted in dev testing
+  // Symmetric fallback when JWKS is not configured
   if (!getJwksUri() && process.env.SUPABASE_JWT_SECRET) {
     try {
-      const decoded = jwt.verify(token, process.env.SUPABASE_JWT_SECRET, verifyOptions) as { sub: string; [key: string]: any };
-      (req as any).user = { id: decoded.sub, ...decoded };
+      const decoded = jwt.verify(token, process.env.SUPABASE_JWT_SECRET, verifyOptions) as {
+        sub: string;
+        [key: string]: unknown;
+      };
+      attachUser(req, decoded);
       return next();
-    } catch (err: any) {
+    } catch {
       return res.status(401).json({ error: "Unauthorized: Invalid token (symmetric)" });
     }
   }
@@ -84,14 +118,7 @@ export const requireAuth = (req: Request, res: Response, next: NextFunction) => 
       return res.status(401).json({ error: "Unauthorized: Invalid token" });
     }
 
-    const payload = decoded as { sub: string; [key: string]: any };
-    
-    // Attach user payload
-    (req as any).user = {
-      id: payload.sub,
-      ...payload
-    };
-
+    attachUser(req, decoded as { sub: string; [key: string]: unknown });
     next();
   });
 };
