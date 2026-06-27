@@ -196,11 +196,30 @@ export function buildCrmGeminiDeclarations(): Record<string, unknown>[] {
 
   for (const res of CRM_RESOURCES) {
     for (const op of CRM_OPERATIONS) {
-      declarations.push({
+      const decl: Record<string, unknown> = {
         name: `crm_${op}_${res.slug}`,
         description: opDescription(op, res.label),
         parameters: opParameters(op, res.label),
-      });
+      };
+      if (op === "create" && res.slug === "enterprise") {
+        decl.parameters = {
+          type: "OBJECT",
+          properties: {
+            name: {
+              type: "STRING",
+              description: "Company / enterprise name (required — stored as nom in RapidoCRM)",
+            },
+            email: { type: "STRING", description: "Contact email for the enterprise" },
+            notes: { type: "STRING", description: "Additional notes from the meeting" },
+            data: {
+              type: "OBJECT",
+              description: "Extra enterprise fields (phone, address, siret, etc.)",
+            },
+          },
+          required: ["name"],
+        };
+      }
+      declarations.push(decl);
     }
   }
 

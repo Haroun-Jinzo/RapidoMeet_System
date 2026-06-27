@@ -45,7 +45,7 @@ class SessionManager implements ISessionManager {
       });
 
       this.redis.on("connect", () => {
-        console.log("[Session] ✅ Connected to Redis");
+        //console.log("[Session] ✅ Connected to Redis");
         this.isRedisAvailable = true;
       });
 

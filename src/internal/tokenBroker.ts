@@ -7,6 +7,10 @@ import { PendingActionStatus } from "../interfaces";
 
 export const internalRouter = Router();
 
+function isConnectedStatus(status: string): boolean {
+  return status === "connected" || status === "active";
+}
+
 // Apply internal secret middleware to all routes inside this router
 internalRouter.use(requireInternalAuth);
 
@@ -33,7 +37,7 @@ async function validateRequestSafely(connectionId: string, sessionId: string, ac
     throw new Error("Connection does not belong to the session's user");
   }
 
-  if (connection.status !== 'active') {
+  if (!isConnectedStatus(connection.status)) {
     throw new Error("Connection is not active");
   }
 
@@ -68,7 +72,7 @@ internalRouter.post("/google/access-token", async (req, res) => {
       return res.status(400).json({ error: "Connection is not a Google connection" });
     }
 
-    const refreshToken = await connectionsStore.getVaultSecret(connection.vault_secret_id);
+    const refreshToken = await connectionsStore.getVaultSecret(connection.id);
     if (!refreshToken) {
       return res.status(404).json({ error: "Google connection secret not found in vault" });
     }
@@ -121,7 +125,7 @@ internalRouter.post("/telegram/sendMessage", async (req, res) => {
        return res.status(400).json({ error: "Connection is not a Telegram connection" });
     }
 
-    const botToken = await connectionsStore.getVaultSecret(connection.vault_secret_id);
+    const botToken = await connectionsStore.getVaultSecret(connection.id);
     if (!botToken) {
       return res.status(404).json({ error: "Telegram bot token missing in Vault" });
     }

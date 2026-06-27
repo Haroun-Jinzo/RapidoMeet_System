@@ -261,7 +261,7 @@ requiresConfirmation MUST be false for:
 4. Use crm_delete_* only when the user explicitly requests deletion
 5. Use crm_read_* only when information from CRM is needed to complete another action
 6. Create calendar_create_event if a task or decision mentions scheduling a meeting, a call, or an event in the future.
-7. Always create email_send_recap at end (last action). For "target_email", you MUST extract the actual email address provided by the user in the Instructions above. If no email is found, or if instructions are empty, fallback to "admin@example.com". NEVER output null or placeholder text.
+7. Always create email_send_recap at end (last action). For "target_email", you MUST extract the actual email address provided by the user in the Instructions above. NEVER output null or placeholder text.
 8. In your Output Format, replace all example values with real data extracted from the meeting and instructions.
 9. Only create crm_log_activity if CRM contact exists
 10. Don't create actions for vague/uncertain information

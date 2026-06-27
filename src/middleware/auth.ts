@@ -1,36 +1,23 @@
 import { Request, Response, NextFunction } from "express";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import jwt from "jsonwebtoken";
-import jwksClient from "jwks-rsa";
 import * as dotenv from "dotenv";
 
 dotenv.config();
 
-function getJwksUri(): string {
-  if (process.env.JWKS_URI) return process.env.JWKS_URI;
-  if (process.env.SUPABASE_URL) {
-    const baseUrl = process.env.SUPABASE_URL.replace(/\/$/, "");
-    return `${baseUrl}/auth/v1/jwks`; // Supabase convention
+let supabaseAuthAdmin: SupabaseClient | null = null;
+
+function getSupabaseAuthAdmin(): SupabaseClient | null {
+  const url = process.env.SUPABASE_URL?.trim();
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (!url || !key) return null;
+
+  if (!supabaseAuthAdmin) {
+    supabaseAuthAdmin = createClient(url, key, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
   }
-  return "";
-}
-
-const client = jwksClient({
-  jwksUri: getJwksUri(),
-  cache: true,
-  cacheMaxEntries: 5,
-  cacheMaxAge: 3600000, // 1 hour
-  rateLimit: true,
-  jwksRequestsPerMinute: 10
-});
-
-function getKey(header: jwt.JwtHeader, callback: jwt.SigningKeyCallback) {
-  client.getSigningKey(header.kid, (err, key) => {
-    if (err || !key) {
-      return callback(err || new Error("Key not found in JWKS"));
-    }
-    const signingKey = key.getPublicKey();
-    callback(null, signingKey);
-  });
+  return supabaseAuthAdmin;
 }
 
 /**
@@ -68,57 +55,83 @@ function getVerifyOptions(): jwt.VerifyOptions {
   return verifyOptions;
 }
 
-function attachUser(req: Request, decoded: { sub: string; [key: string]: unknown }): void {
-  (req as any).user = {
-    id: decoded.sub,
-    ...decoded,
+function attachUser(req: Request, userId: string, extra: Record<string, unknown> = {}): void {
+  (req as Request & { user: { id: string } }).user = {
+    id: userId,
+    ...extra,
   };
 }
 
-export const requireAuth = (req: Request, res: Response, next: NextFunction) => {
-  // Allow internal service calls
-  const internalAuth = req.headers["x-internal-auth"] || req.headers["x-internal-token"];
-  if (internalAuth && internalAuth === process.env.INTERNAL_INGEST_SECRET) {
-    const providedUserId = req.headers["x-internal-user-id"] as string;
-    (req as any).user = { id: providedUserId || "00000000-0000-0000-0000-000000000000" };
-    return next();
+async function verifySupabaseAccessToken(
+  token: string
+): Promise<{ userId: string; extra: Record<string, unknown> } | null> {
+  const admin = getSupabaseAuthAdmin();
+  if (!admin) return null;
+
+  const { data, error } = await admin.auth.getUser(token);
+  if (error || !data.user) {
+    console.warn("[Auth] Supabase getUser failed:", error?.message ?? "no user");
+    return null;
   }
 
-  // Allow bypassing auth in development if BYPASS_AUTH is set to "true"
-  if (process.env.BYPASS_AUTH === "true") {
-    const bypassUserId = req.headers["x-bypass-user-id"] as string;
-    (req as any).user = { id: bypassUserId || "11111111-1111-1111-1111-111111111111" };
-    return next();
+  return {
+    userId: data.user.id,
+    extra: { email: data.user.email },
+  };
+}
+
+function verifyWithJwtSecret(token: string): { userId: string } | null {
+  const secret = process.env.SUPABASE_JWT_SECRET?.trim();
+  if (!secret) return null;
+
+  try {
+    const decoded = jwt.verify(token, secret, getVerifyOptions()) as {
+      sub: string;
+      [key: string]: unknown;
+    };
+    return { userId: decoded.sub };
+  } catch (err) {
+    console.warn("[Auth] JWT secret verify failed:", (err as Error).message);
+    return null;
   }
+}
 
-  const token = extractBearerToken(req);
-  if (!token) {
-    return res.status(401).json({ error: "Missing or invalid authorization" });
-  }
-
-  const verifyOptions = getVerifyOptions();
-
-  // Symmetric fallback when JWKS is not configured
-  if (!getJwksUri() && process.env.SUPABASE_JWT_SECRET) {
-    try {
-      const decoded = jwt.verify(token, process.env.SUPABASE_JWT_SECRET, verifyOptions) as {
-        sub: string;
-        [key: string]: unknown;
-      };
-      attachUser(req, decoded);
+export const requireAuth = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const internalAuth = req.headers["x-internal-auth"] || req.headers["x-internal-token"];
+    if (internalAuth && internalAuth === process.env.INTERNAL_INGEST_SECRET) {
+      const providedUserId = req.headers["x-internal-user-id"] as string;
+      attachUser(req, providedUserId || "00000000-0000-0000-0000-000000000000");
       return next();
-    } catch {
-      return res.status(401).json({ error: "Unauthorized: Invalid token (symmetric)" });
     }
+
+    const token = extractBearerToken(req);
+
+    if (!token && process.env.BYPASS_AUTH === "true") {
+      const bypassUserId = req.headers["x-bypass-user-id"] as string;
+      attachUser(req, bypassUserId || "11111111-1111-1111-1111-111111111111");
+      return next();
+    }
+
+    if (!token) {
+      return res.status(401).json({ error: "Missing or invalid authorization" });
+    }
+
+    const fromSupabase = await verifySupabaseAccessToken(token);
+    if (fromSupabase) {
+      attachUser(req, fromSupabase.userId, fromSupabase.extra);
+      return next();
+    }
+
+    const fromSecret = verifyWithJwtSecret(token);
+    if (fromSecret) {
+      attachUser(req, fromSecret.userId);
+      return next();
+    }
+
+    return res.status(401).json({ error: "Unauthorized: Invalid token" });
+  } catch (err) {
+    console.error("[Auth] Unexpected error:", err);
+    return res.status(500).json({ error: "Authentication failed" });
   }
-
-  jwt.verify(token, getKey, verifyOptions, (err, decoded) => {
-    if (err) {
-      console.error("JWKS Verification failed:", err.message);
-      return res.status(401).json({ error: "Unauthorized: Invalid token" });
-    }
-
-    attachUser(req, decoded as { sub: string; [key: string]: unknown });
-    next();
-  });
 };

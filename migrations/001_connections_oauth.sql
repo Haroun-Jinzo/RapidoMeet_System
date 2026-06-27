@@ -1,0 +1,3 @@
+-- RapidoCRM OAuth tokens are stored in public.user_connections (integration_id = 'rapidocrm').
+-- No separate connections table or Supabase Vault required.
+-- See openclaw-server/src/integrations/ConnectionsStore.ts

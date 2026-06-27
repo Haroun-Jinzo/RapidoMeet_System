@@ -28,6 +28,9 @@ import { openclawClient } from "./openclaw/OpenClawClient";
 import multer from "multer";
 import { progressBus } from "./progress/ProgressBus";
 import { streamSessionProgress } from "./progress/sse";
+import { crmOAuthRouter } from "./auth/crmOAuthRouter";
+import { isCrmTool } from "./config/crmTools";
+import { mergeActionStatuses } from "./utils/mergeActionStatuses";
 
 type AudioUploadRequest = Omit<Request, "file"> & {
   file?: {
@@ -121,6 +124,9 @@ app.use((req, res, next) => {
 
 // Internal routes (OpenClaw -> RapidoMeet via shared secret)
 app.use('/internal', internalRouter);
+
+// RapidoCRM OAuth2 + PKCE (public client — no client_secret required)
+app.use('/auth/crm', crmOAuthRouter);
 
 // Custom file handling - expects audio data in req.body
 const handleAudioUpload: express.RequestHandler = (req, res, next) => {
@@ -296,9 +302,13 @@ app.post(
 
         // ── Step 5: Execute non-critical actions immediately ───────────────
         console.log(`[Pipeline] ${session.id} — Step 5: Executing Actions via N8N...`);
-        const results = await mcpDispatcher.executeAll(actions, session.id, apiKeys, {
+        await mcpDispatcher.executeAll(actions, session.id, apiKeys, {
           userId: user.id,
         });
+
+        // Persist dispatch state so approvals during slow I/O see up-to-date actions
+        session.actions = actions;
+        await sessionManager.save(session);
 
         // Save to database
         try {
@@ -329,11 +339,25 @@ app.post(
         }
 
         // ── Step 6: Check for critical actions delaying completion ─────────
+        // Reconcile with Redis — user may have approved while step 5 I/O was running
+        const persisted = await sessionManager.load(session.id);
+        if (persisted?.actions) {
+          mergeActionStatuses(actions, persisted.actions);
+        }
+        session.actions = actions;
+
         const pendingCritical = actions.filter(
-          a => a.requiresConfirmation && a.status === "pending"
+          (a) => a.requiresConfirmation && a.status === "pending"
         );
 
-        if (pendingCritical.length > 0) {
+        const alreadyComplete =
+          persisted?.status === "complete" && pendingCritical.length === 0;
+
+        if (alreadyComplete) {
+          session.status = "complete";
+          await sessionManager.save(session);
+          console.log(`[Pipeline] ${session.id} — Complete (approvals received during step 5)`);
+        } else if (pendingCritical.length > 0) {
           session.status = "awaiting_confirmation";
           await sessionManager.save(session);
           console.log(`[Pipeline] ${session.id} — Paused: ${pendingCritical.length} action(s) awaiting confirmation`);
@@ -345,7 +369,6 @@ app.post(
             detail: pendingCritical.map((a) => a.tool).join(", "),
           });
 
-          // Notify OpenClaw (if enabled)
           try {
             await openclawClient.sendReport("meeting.awaiting_confirmation", {
               session_id: session.id,
@@ -355,11 +378,10 @@ app.post(
               proposed_actions: actions,
               pending_critical: pendingCritical,
             });
-          } catch(err) { 
-            console.warn("[Pipeline] OpenClaw WS notify failed:", err); 
+          } catch (err) {
+            console.warn("[Pipeline] OpenClaw WS notify failed:", err);
           }
         } else {
-          // ── Step 6 (Alternate): No pending critical, mark as complete ──────
           session.status = "complete";
           await sessionManager.save(session);
 
@@ -461,10 +483,38 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
   const action = session.actions?.find((a: any) => a.id === action_id);
   if (!action) return res.status(404).json({ error: 'Action not found' });
 
-  action.status = decision === 'confirm' ? 'confirmed' : 'refused';
-  console.log(`[Gate] Action ${action_id} ${action.status.toUpperCase()} (n8n executes CRM after Telegram approval)`);
+  const countStillPending = () =>
+    session.actions?.filter(
+      (a: any) => a.requiresConfirmation && a.status === "pending"
+    ) ?? [];
 
-  // Sync pending_actions — execution is owned by n8n approval workflows, not resume().
+  // Idempotent confirm — avoid duplicate CRM writes if user approves twice
+  if (
+    decision === "confirm" &&
+    (action.status === "executed" ||
+      (action.status === "confirmed" && action.execution_status === "success"))
+  ) {
+    console.log(`[Gate] Action ${action_id} already executed — skipping duplicate confirm`);
+    const stillPending = countStillPending();
+    if (stillPending.length === 0) {
+      session.status = "complete";
+    }
+    await sessionManager.save(session);
+    return res.json({
+      action_id,
+      decision: action.status,
+      already_done: true,
+      still_pending: stillPending.length,
+    });
+  }
+
+  if (decision === "confirm" && action.status === "refused") {
+    return res.status(409).json({ error: "Action was already refused" });
+  }
+
+  action.status = decision === 'confirm' ? 'confirmed' : 'refused';
+  console.log(`[Gate] Action ${action_id} ${action.status.toUpperCase()}`);
+
   try {
     await memoryManager.updatePendingActionStatus(
       action_id,
@@ -474,9 +524,41 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
     console.warn(`[Gate] pending_actions update failed for ${action_id}:`, (err as Error).message);
   }
 
-  const stillPending = session.actions?.filter(
-    (a: any) => a.requiresConfirmation && a.status === 'pending' && a.id !== action_id
-  ) || [];
+  // CRM tools: execute directly via RapidoCRM MCP (OAuth Bearer) — no n8n hop.
+  if (decision === 'confirm' && isCrmTool(action.tool)) {
+    try {
+      const apiKeys = await KeyResolver.resolveKeys(session.userId);
+      const execResult = await mcpDispatcher.execute(action, apiKeys);
+      if (execResult.success) {
+        action.status = "executed";
+        action.execution_status = "success";
+        action.updated_at = new Date().toISOString();
+        console.log(`[Gate] CRM action ${action_id} executed via RapidoCRM MCP`);
+        progressBus.emit({
+          sessionId: session_id,
+          step: 'action',
+          message: `Completed: ${action.tool.replace(/_/g, ' ')}`,
+          progress: 98,
+          detail: 'Executed after approval via RapidoCRM MCP',
+        });
+      } else {
+        action.execution_status = "failed";
+        console.error(`[Gate] CRM action ${action_id} failed:`, execResult.error);
+        progressBus.emit({
+          sessionId: session_id,
+          step: 'error',
+          message: `Failed: ${action.tool.replace(/_/g, ' ')}`,
+          progress: 98,
+          error: execResult.error,
+        });
+      }
+    } catch (err) {
+      action.execution_status = "failed";
+      console.error(`[Gate] CRM execution error for ${action_id}:`, (err as Error).message);
+    }
+  }
+
+  const stillPending = countStillPending();
 
   if (stillPending.length === 0) {
     session.status = 'complete';
