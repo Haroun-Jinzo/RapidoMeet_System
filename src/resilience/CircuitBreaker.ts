@@ -175,38 +175,3 @@ export class CircuitBreaker {
     console.log(`[CircuitBreaker] ${this.serviceName} manually reset.`);
   }
 }
-
-/**
- * Factory for creating pre-configured circuit breakers for all services
- * This ensures consistent failure handling across the application
- */
-export class CircuitBreakerRegistry {
-  private static breakers: Map<string, CircuitBreaker> = new Map();
-
-  /**
-   * Get or create a circuit breaker for a service
-   */
-  static getBreaker(
-    serviceName: string,
-    config: CircuitBreakerConfig
-  ): CircuitBreaker {
-    if (!this.breakers.has(serviceName)) {
-      this.breakers.set(serviceName, new CircuitBreaker(serviceName, config));
-    }
-    return this.breakers.get(serviceName)!;
-  }
-
-  /**
-   * Get all breaker statuses for monitoring dashboard
-   */
-  static getAllStatus(): Record<string, CircuitBreaker> {
-    return Object.fromEntries(this.breakers);
-  }
-
-  /**
-   * Reset all breakers (useful during application restart)
-   */
-  static resetAll(): void {
-    this.breakers.forEach((breaker) => breaker.reset());
-  }
-}

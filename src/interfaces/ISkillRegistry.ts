@@ -5,7 +5,7 @@ import { ISkill } from "./ISkill";
  * File: src/skill-loader.ts
  *
  * The ONLY module that reads .md files from disk.
- * Provides auto-detection and hot-reload via Chokidar.
+ * Provides auto-detection from transcript keywords.
  * No network calls, no database — filesystem only.
  */
 export interface ISkillRegistry {
@@ -24,22 +24,4 @@ export interface ISkillRegistry {
    * Falls back to "general" if no keywords match.
    */
   detect(transcript: string): ISkill;
-
-  /** Return all currently loaded skills. */
-  list(): ISkill[];
-
-  /**
-   * Start watching the /skills directory for file changes.
-   * Any .md file saved → automatically reloaded without server restart.
-   * This is the hot-reload feature.
-   */
-  watch(): void;
 }
-
-// SECTION 11 — PIPELINE RESULT (used by index.ts)
-// The final output object returned after a full meeting is processed.
-
-/**
- * Everything that happened during one full pipeline execution.
- * Returned by the orchestrate() function in index.ts.
- */

@@ -10,7 +10,6 @@
 import * as fs   from "fs";
 import * as path from "path";
 import matter    from "gray-matter";  // parses YAML frontmatter from .md files
-import chokidar  from "chokidar";     // watches files for changes
 
 import { ISkill, ISkillRegistry, MeetingType } from "./interfaces";
 
@@ -177,55 +176,6 @@ class SkillLoader implements ISkillRegistry {
 
     // If even general doesn't exist, something is very wrong
     throw new Error("[SkillLoader] No skills loaded — call loadAll() first");
-  }
-
-  // ── list ───────────────────────────────────────────────────────────────────
-  // Returns all loaded skills as an array.
-  // Used by the /skills API endpoint to show the UI what's available.
-
-  list(): ISkill[] {
-    return [...this.skills.values()];
-  }
-
-  // ── watch ──────────────────────────────────────────────────────────────────
-  // Starts watching the skills directory for file changes.
-  // Any .md file that is added, modified, or deleted → reloads automatically.
-  // This is the hot-reload feature — no server restart needed.
-
-  watch(): void {
-    console.log(`[SkillLoader] Watching for changes in: ${this.skillsDir}`);
-
-    const watcher = chokidar.watch(
-      path.join(this.skillsDir, "*.md"),
-      {
-        persistent: true,     // Keep watching even when other work is done
-        ignoreInitial: true,  // Don't fire events for files loaded at startup
-      }
-    );
-
-    // File added → load it
-    watcher.on("add", (filePath) => {
-      console.log(`[SkillLoader] New skill file detected: ${filePath}`);
-      this.loadFile(filePath);
-    });
-
-    // File modified → reload it
-    watcher.on("change", (filePath) => {
-      const skillName = path.basename(filePath, ".md");
-      console.log(`[SkillLoader] Skill changed, reloading: ${skillName}`);
-      this.loadFile(filePath);
-    });
-
-    // File deleted → remove from memory
-    watcher.on("unlink", (filePath) => {
-      const skillName = path.basename(filePath, ".md");
-      this.skills.delete(skillName);
-      console.log(`[SkillLoader] Skill removed: ${skillName}`);
-    });
-
-    watcher.on("error", (error) => {
-      console.error("[SkillLoader] Watcher error:", error);
-    });
   }
 
   // ── createDefaultSkills ────────────────────────────────────────────────────

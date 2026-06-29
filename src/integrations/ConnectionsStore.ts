@@ -5,6 +5,11 @@ import {
   RAPIDOCRM_PROVIDER,
   validateMcpUrl,
 } from "../auth/crmOAuthConfig";
+import {
+  getGoogleOAuthConfig,
+  GOOGLE_CALENDAR_PROVIDER,
+} from "../auth/googleOAuthConfig";
+import { TELEGRAM_PROVIDER } from "../auth/telegramConfig";
 import { decryptCredential, encryptCredential } from "./credentialCrypto";
 
 /**
@@ -51,6 +56,25 @@ export interface CRMConnectionContext {
   accessToken: string;
   mcpUrl: string;
   connectionId: string;
+}
+
+export interface GoogleCalendarConnectionContext {
+  accessToken: string;
+  connectionId: string;
+}
+
+export interface TelegramConnectionContext {
+  botToken: string;
+  chatId: string;
+  connectionId: string;
+  botUsername?: string | null;
+}
+
+function accountLabelForProvider(provider: string): string {
+  if (provider === GOOGLE_CALENDAR_PROVIDER) return "Google Calendar";
+  if (provider === RAPIDOCRM_PROVIDER) return "RapidoCRM";
+  if (provider === TELEGRAM_PROVIDER) return "Telegram";
+  return provider;
 }
 
 function mapRow(row: UserConnectionRow): ConnectionRecord {
@@ -111,11 +135,6 @@ export class ConnectionsStore {
 
   async hasActiveConnection(userId: string, provider: string): Promise<boolean> {
     const conn = await this.getUserConnection(userId, provider);
-    return !!conn && isConnectedStatus(conn.status);
-  }
-
-  async hasConnection(connectionId: string): Promise<boolean> {
-    const conn = await this.getConnection(connectionId);
     return !!conn && isConnectedStatus(conn.status);
   }
 
@@ -186,19 +205,37 @@ export class ConnectionsStore {
     tokens: OAuthTokenPayload,
     extraMetadata?: Record<string, unknown>
   ): Promise<void> {
-    const config = getCrmOAuthConfig();
     const existing = await this.getUserConnection(userId, provider);
+
+    // Google may omit refresh_token on re-consent — preserve the stored one
+    if (!tokens.refresh_token && existing) {
+      const previous = await this.readOAuthTokens(existing.id);
+      if (previous?.refresh_token) {
+        tokens = { ...tokens, refresh_token: previous.refresh_token };
+      }
+    }
+
     const secretJson = JSON.stringify(tokens);
 
-    const configPatch = {
+    const configPatch: Record<string, unknown> = {
       ...(existing?.metadata ?? {}),
       ...(extraMetadata ?? {}),
-      connected_at: (existing?.metadata?.connected_at as string) ?? new Date().toISOString(),
-      mcp_url: this.resolveMcpUrl({
-        ...(existing?.metadata ?? {}),
-        mcp_url: extraMetadata?.mcp_url ?? existing?.metadata?.mcp_url ?? config.defaultMcpUrl,
-      }),
+      connected_at:
+        (extraMetadata?.connected_at as string) ??
+        (existing?.metadata?.connected_at as string) ??
+        new Date().toISOString(),
     };
+
+    if (provider === RAPIDOCRM_PROVIDER) {
+      const config = getCrmOAuthConfig();
+      configPatch.mcp_url = this.resolveMcpUrl({
+        ...(existing?.metadata ?? {}),
+        mcp_url:
+          extraMetadata?.mcp_url ?? existing?.metadata?.mcp_url ?? config.defaultMcpUrl,
+      });
+    }
+
+    const label = accountLabelForProvider(provider);
 
     if (existing) {
       await this.writeEncryptedCredentials(existing.id, secretJson);
@@ -209,7 +246,7 @@ export class ConnectionsStore {
           status: "connected",
           connection_type: "oauth",
           config: configPatch,
-          account_label: "RapidoCRM",
+          account_label: label,
           updated_at: new Date().toISOString(),
         })
         .eq("id", existing.id);
@@ -228,7 +265,7 @@ export class ConnectionsStore {
       connection_type: "oauth",
       credentials: { encrypted },
       config: configPatch,
-      account_label: "RapidoCRM",
+      account_label: label,
       connected_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
@@ -363,21 +400,126 @@ export class ConnectionsStore {
     return updated.access_token;
   }
 
-  private async markConnectionExpired(connectionId: string): Promise<void> {
+  async getGoogleCalendarConnection(userId: string): Promise<GoogleCalendarConnectionContext> {
+    const accessToken = await this.getGoogleAccessToken(userId);
+    const conn = await this.getUserConnection(userId, GOOGLE_CALENDAR_PROVIDER);
+
+    if (!conn || !isConnectedStatus(conn.status)) {
+      throw new Error(
+        "Google Calendar is not connected. Go to Settings → Integrations and connect your Google account."
+      );
+    }
+
+    return {
+      accessToken,
+      connectionId: conn.id,
+    };
+  }
+
+  async getGoogleAccessToken(userId: string): Promise<string> {
+    const conn = await this.getUserConnection(userId, GOOGLE_CALENDAR_PROVIDER);
+
+    if (!conn || !isConnectedStatus(conn.status)) {
+      throw new Error(
+        "Google Calendar is not connected. Go to Settings → Integrations and connect your Google account."
+      );
+    }
+
+    const tokens = await this.readOAuthTokens(conn.id);
+    if (!tokens) {
+      throw new Error("Google Calendar credentials missing. Please reconnect.");
+    }
+
+    const refreshBufferMs = 5 * 60 * 1000;
+    if (Date.now() + refreshBufferMs >= tokens.expires_at) {
+      return this.refreshGoogleToken(userId, conn.id, tokens);
+    }
+
+    return tokens.access_token;
+  }
+
+  private async refreshGoogleToken(
+    userId: string,
+    connectionId: string,
+    currentTokens: OAuthTokenPayload
+  ): Promise<string> {
+    const config = getGoogleOAuthConfig();
+
+    if (!config.clientId || !config.clientSecret) {
+      throw new Error("Google OAuth is not configured on the server.");
+    }
+
+    if (!currentTokens.refresh_token) {
+      await this.markConnectionExpired(connectionId);
+      throw new Error(
+        "Google Calendar session expired and no refresh token is available. Please reconnect in Settings."
+      );
+    }
+
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      refresh_token: currentTokens.refresh_token,
+    });
+
+    const response = await fetch(config.tokenUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body,
+    });
+
+    const data = (await response.json()) as Record<string, unknown>;
+
+    if (!response.ok || response.status === 401 || response.status === 400) {
+      console.error("[ConnectionsStore] Google token refresh failed:", data);
+      await this.markConnectionExpired(connectionId);
+      throw new Error(
+        "Google Calendar session expired. Please reconnect your account in Settings → Integrations."
+      );
+    }
+
+    const expiresIn = typeof data.expires_in === "number" ? data.expires_in : 3600;
+    const updated: OAuthTokenPayload = {
+      access_token: String(data.access_token),
+      refresh_token: String(data.refresh_token ?? currentTokens.refresh_token),
+      token_type: String(data.token_type ?? currentTokens.token_type ?? "Bearer"),
+      expires_at: Date.now() + expiresIn * 1000,
+    };
+
+    await this.writeEncryptedCredentials(connectionId, JSON.stringify(updated));
+
+    await supabaseService
+      .from("user_connections")
+      .update({ updated_at: new Date().toISOString() })
+      .eq("id", connectionId);
+
+    console.log(`[ConnectionsStore] Refreshed Google Calendar token for user ${userId}`);
+    return updated.access_token;
+  }
+
+  async markConnectionExpired(connectionId: string): Promise<void> {
     await supabaseService
       .from("user_connections")
       .update({ status: "expired", updated_at: new Date().toISOString() })
       .eq("id", connectionId);
   }
 
-  async revokeConnection(userId: string, provider: string): Promise<void> {
+  async revokeConnection(
+    userId: string,
+    provider: string,
+    options?: { status?: string }
+  ): Promise<void> {
     const conn = await this.getUserConnection(userId, provider);
     if (!conn) return;
 
     await supabaseService
       .from("user_connections")
       .update({
-        status: "disconnected",
+        status: options?.status ?? "disconnected",
         credentials: {},
         updated_at: new Date().toISOString(),
       })
@@ -394,6 +536,111 @@ export class ConnectionsStore {
       .from("user_connections")
       .update({ updated_at: new Date().toISOString() })
       .eq("id", connectionId);
+  }
+
+  private async readTelegramCredentials(
+    connectionId: string
+  ): Promise<{ bot_token: string; chat_id: string } | null> {
+    const raw = await this.getVaultSecret(connectionId);
+    if (!raw) return null;
+
+    try {
+      const parsed = JSON.parse(raw) as { bot_token?: string; chat_id?: string };
+      if (parsed.bot_token && parsed.chat_id) {
+        return { bot_token: parsed.bot_token, chat_id: parsed.chat_id };
+      }
+    } catch {
+      // fall through
+    }
+
+    return null;
+  }
+
+  async getTelegramConnection(userId: string): Promise<TelegramConnectionContext | null> {
+    const conn = await this.getUserConnection(userId, TELEGRAM_PROVIDER);
+    if (!conn || !isConnectedStatus(conn.status)) {
+      return null;
+    }
+
+    const creds = await this.readTelegramCredentials(conn.id);
+    if (!creds) {
+      return null;
+    }
+
+    const chatIdFromConfig =
+      typeof conn.metadata?.chat_id === "string" ? conn.metadata.chat_id : creds.chat_id;
+
+    return {
+      botToken: creds.bot_token,
+      chatId: chatIdFromConfig,
+      connectionId: conn.id,
+      botUsername:
+        typeof conn.metadata?.bot_username === "string" ? conn.metadata.bot_username : null,
+    };
+  }
+
+  async storeTelegramCredentials(
+    userId: string,
+    botToken: string,
+    chatId: string,
+    botUsername?: string | null
+  ): Promise<ConnectionRecord> {
+    const existing = await this.getUserConnection(userId, TELEGRAM_PROVIDER);
+    const secretJson = JSON.stringify({ bot_token: botToken, chat_id: chatId });
+    const label = botUsername ? `@${botUsername}` : "Telegram bot";
+    const configPatch: Record<string, unknown> = {
+      ...(existing?.metadata ?? {}),
+      chat_id: chatId,
+      bot_username: botUsername ?? null,
+      connected_at:
+        (existing?.metadata?.connected_at as string) ?? new Date().toISOString(),
+    };
+
+    if (existing) {
+      await this.writeEncryptedCredentials(existing.id, secretJson);
+
+      const { data, error } = await supabaseService
+        .from("user_connections")
+        .update({
+          status: "connected",
+          connection_type: "api_key",
+          config: configPatch,
+          account_label: label,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", existing.id)
+        .select("*")
+        .single();
+
+      if (error || !data) {
+        throw new Error(`[ConnectionsStore] Telegram update failed: ${error?.message}`);
+      }
+
+      return mapRow(data as UserConnectionRow);
+    }
+
+    const encrypted = encryptCredential(secretJson);
+    const { data, error } = await supabaseService
+      .from("user_connections")
+      .insert({
+        user_id: userId,
+        integration_id: TELEGRAM_PROVIDER,
+        status: "connected",
+        connection_type: "api_key",
+        credentials: { encrypted },
+        config: configPatch,
+        account_label: label,
+        connected_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .select("*")
+      .single();
+
+    if (error || !data) {
+      throw new Error(`[ConnectionsStore] Telegram insert failed: ${error?.message}`);
+    }
+
+    return mapRow(data as UserConnectionRow);
   }
 }
 

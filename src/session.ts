@@ -15,8 +15,6 @@ import {
   MeetingType,
 } from "./interfaces";
 
-import { KeyResolver } from "./utils/KeyResolver";
-
 // How long a session lives in Redis before auto-deletion.
 // 2 hours is more than enough for any meeting + processing time.
 const SESSION_TTL_SECONDS = 60 * 60 * 2; // 7200 seconds
@@ -30,7 +28,6 @@ class SessionManager implements ISessionManager {
   private isRedisAvailable = false;
 
   constructor() {
-    const redisUrl = process.env.REDIS_URL;
     try {
       // Connect to Redis using the environment variable.
       // ioredis handles reconnection automatically if the connection drops.
@@ -45,13 +42,11 @@ class SessionManager implements ISessionManager {
       });
 
       this.redis.on("connect", () => {
-        //console.log("[Session] ✅ Connected to Redis");
         this.isRedisAvailable = true;
       });
 
-      this.redis.on("error", (err) => {
+      this.redis.on("error", () => {
         this.isRedisAvailable = false;
-        //console.warn("[Session] ⚠️  Redis unavailable — using in-memory storage:", err.message);
       });
 
       // Attempt initial connection but don't block if it fails
@@ -177,70 +172,6 @@ class SessionManager implements ISessionManager {
       ...parsed,
       startedAt: new Date(parsed.startedAt),
     } as ISessionContext;
-  }
-
-  // ── updateStatus ───────────────────────────────────────────────────────────
-  // Changes ONLY the status of a session without a full load/save cycle.
-  // This is used by the Confirmation Gate which needs to flip the status
-  // quickly without loading and resaving the entire session (which may
-  // include a large transcript and extraction JSON).
-
-  async updateStatus(
-    sessionId: string,
-    status:    ISessionContext["status"]
-  ): Promise<void> {
-    // Load the full session
-    const session = await this.load(sessionId);
-
-    if (!session) {
-      throw new Error(`[Session] Cannot update status: session ${sessionId} not found`);
-    }
-
-    // Modify only the status field
-    session.status = status;
-
-    // Save it back — the TTL resets to 2 hours again
-    await this.save(session);
-
-    console.log(`[Session] ${sessionId} → status: ${status}`);
-  }
-
-  // ── delete ─────────────────────────────────────────────────────────────────
-  // Removes a session from Redis.
-  // Called by memory.ts AFTER the session has been saved to PostgreSQL.
-  // This frees up Redis memory and avoids storing duplicate data.
-
-  async delete(sessionId: string): Promise<void> {
-    const key = this.makeKey(sessionId);
-    
-    if (this.redis && this.isRedisAvailable) {
-      try {
-        await this.redis.del(key);
-      } catch {
-        this.memoryStorage.delete(key);
-      }
-    } else {
-      this.memoryStorage.delete(key);
-    }
-    
-    console.log(`[Session] Deleted: ${sessionId}`);
-  }
-
-  // ── disconnect ─────────────────────────────────────────────────────────────
-  // Gracefully closes the Redis connection when the server shuts down.
-  // Called by index.ts on process exit signals.
-
-  async disconnect(): Promise<void> {
-    if (this.redis) {
-      try {
-        await this.redis.quit();
-        console.log("[Session] Redis connection closed");
-      } catch {
-        console.warn("[Session] Redis already disconnected or unavailable");
-      }
-    } else {
-      console.log("[Session] Using in-memory storage (no Redis to disconnect)");
-    }
   }
 }
 

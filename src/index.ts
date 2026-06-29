@@ -4,7 +4,7 @@
 // Responsibility: Start Express server, set up routes, manage request pipeline.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import express, { Request, Response, NextFunction } from "express";
+import express, { Request, Response } from "express";
 import cors from "cors";
 import * as dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
@@ -21,7 +21,6 @@ import { mcpDispatcher } from "./dispatcher";
 import { sessionManager } from "./session";
 import { skillRegistry } from "./skill-loader";
 import { memoryManager } from "./memory";
-import { reportFormatter } from "./formatter";
 import { requireAuth } from "./middleware/auth";
 import { internalRouter } from "./internal/tokenBroker";
 import { openclawClient } from "./openclaw/OpenClawClient";
@@ -29,8 +28,28 @@ import multer from "multer";
 import { progressBus } from "./progress/ProgressBus";
 import { streamSessionProgress } from "./progress/sse";
 import { crmOAuthRouter } from "./auth/crmOAuthRouter";
+import { googleOAuthRouter } from "./auth/googleOAuthRouter";
+import { telegramRouter } from "./auth/telegramRouter";
 import { isCrmTool } from "./config/crmTools";
 import { mergeActionStatuses } from "./utils/mergeActionStatuses";
+import { formatPendingAction, formatConfirmationAction } from "./utils/pendingActionFormatter";
+import { IAction, ISessionContext } from "./interfaces";
+import { persistMeetingResults } from "./integrations/persistMeetingResults";
+
+function getPendingCriticalActions(actions: IAction[] | undefined): IAction[] {
+  return actions?.filter((a) => a.requiresConfirmation && a.status === "pending") ?? [];
+}
+
+async function syncMeetingToSupabase(
+  session: ISessionContext,
+  meetingStatus: "analyzing" | "completed"
+): Promise<void> {
+  try {
+    await persistMeetingResults(session, { meetingStatus });
+  } catch (err) {
+    console.warn("[Pipeline] persistMeetingResults failed:", (err as Error).message);
+  }
+}
 
 type AudioUploadRequest = Omit<Request, "file"> & {
   file?: {
@@ -127,6 +146,8 @@ app.use('/internal', internalRouter);
 
 // RapidoCRM OAuth2 + PKCE (public client — no client_secret required)
 app.use('/auth/crm', crmOAuthRouter);
+app.use('/auth/google', googleOAuthRouter);
+app.use('/auth/telegram', telegramRouter);
 
 // Custom file handling - expects audio data in req.body
 const handleAudioUpload: express.RequestHandler = (req, res, next) => {
@@ -165,7 +186,14 @@ app.post(
       language      = "",
       participants  = "",
       user_instructions = "",
+      meeting_id    = "",
+      meetingId     = "",
     } = req.body;
+
+    const resolvedMeetingId =
+      (typeof meeting_id === "string" && meeting_id.trim()) ||
+      (typeof meetingId === "string" && meetingId.trim()) ||
+      undefined;
 
     // ── Step 1: Create session ─────────────────────────────────────────────
     const session = await sessionManager.create(
@@ -173,6 +201,10 @@ app.post(
       meeting_title,
       meeting_type as any
     );
+
+    if (resolvedMeetingId) {
+      session.meetingId = resolvedMeetingId;
+    }
 
     // Parse participants from comma-separated string to array
     session.participants = participants
@@ -237,6 +269,8 @@ app.post(
           apiKeys
         );
         session.transcript = transcription.transcript;
+        session.transcriptionSegments = transcription.segments;
+        session.durationSeconds = Math.round(transcription.duration ?? 0);
         await sessionManager.save(session);
         progressBus.emit({
           sessionId: session.id,
@@ -245,7 +279,6 @@ app.post(
           progress: 25,
           detail: `${transcription.transcript.length} characters, ${Math.round(transcription.duration)}s audio`,
         });
-        console.log("user instruction" + user_instructions);
 
         // ── Step 3: Detect skill + Extract ──────────────────────────────────
         console.log(`[Pipeline] ${session.id} — Step 2: Skill detection`);
@@ -310,21 +343,8 @@ app.post(
         session.actions = actions;
         await sessionManager.save(session);
 
-        // Save to database
-        try {
-          await memoryManager.saveMeeting({
-            userId:     user.id,
-            title:      meeting_title,
-            type:       meeting_type as any,
-            transcript: transcription.transcript,
-            extraction,
-            actions,
-            createdAt:  new Date(),
-            duration:   transcription.duration,
-          });
-        } catch (dbErr) {
-          console.warn("[Pipeline] Database save failed (non-fatal):", (dbErr as Error).message);
-        }
+        // Persist extraction output early so meeting tabs populate during approval waits
+        await syncMeetingToSupabase(session, "analyzing");
 
         // Upload audio
         let audioStoragePath: string | null = null;
@@ -356,17 +376,21 @@ app.post(
         if (alreadyComplete) {
           session.status = "complete";
           await sessionManager.save(session);
+          await syncMeetingToSupabase(session, "completed");
           console.log(`[Pipeline] ${session.id} — Complete (approvals received during step 5)`);
         } else if (pendingCritical.length > 0) {
           session.status = "awaiting_confirmation";
           await sessionManager.save(session);
+          await syncMeetingToSupabase(session, "analyzing");
           console.log(`[Pipeline] ${session.id} — Paused: ${pendingCritical.length} action(s) awaiting confirmation`);
           progressBus.emit({
             sessionId: session.id,
             step: "confirmation",
+            state: "awaiting_confirmation",
             message: `${pendingCritical.length} action${pendingCritical.length === 1 ? "" : "s"} waiting for your approval`,
             progress: 95,
             detail: pendingCritical.map((a) => a.tool).join(", "),
+            pending_actions: pendingCritical.map(formatPendingAction),
           });
 
           try {
@@ -384,6 +408,7 @@ app.post(
         } else {
           session.status = "complete";
           await sessionManager.save(session);
+          await syncMeetingToSupabase(session, "completed");
 
           try {
             await openclawClient.sendReport("meeting.completed", {
@@ -401,6 +426,7 @@ app.post(
           progressBus.emit({
             sessionId: session.id,
             step: "complete",
+            state: "complete",
             message: "Meeting processing complete",
             progress: 100,
             detail: `${actions.length} actions processed`,
@@ -483,10 +509,7 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
   const action = session.actions?.find((a: any) => a.id === action_id);
   if (!action) return res.status(404).json({ error: 'Action not found' });
 
-  const countStillPending = () =>
-    session.actions?.filter(
-      (a: any) => a.requiresConfirmation && a.status === "pending"
-    ) ?? [];
+  const countStillPending = () => getPendingCriticalActions(session.actions);
 
   // Idempotent confirm — avoid duplicate CRM writes if user approves twice
   if (
@@ -524,8 +547,12 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
     console.warn(`[Gate] pending_actions update failed for ${action_id}:`, (err as Error).message);
   }
 
-  // CRM tools: execute directly via RapidoCRM MCP (OAuth Bearer) — no n8n hop.
-  if (decision === 'confirm' && isCrmTool(action.tool)) {
+  // CRM / Google Calendar: execute directly after approval — no n8n hop.
+  const runsOnConfirm =
+    decision === "confirm" &&
+    (isCrmTool(action.tool) || action.tool === "calendar_create_event");
+
+  if (runsOnConfirm) {
     try {
       const apiKeys = await KeyResolver.resolveKeys(session.userId);
       const execResult = await mcpDispatcher.execute(action, apiKeys);
@@ -533,17 +560,22 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
         action.status = "executed";
         action.execution_status = "success";
         action.updated_at = new Date().toISOString();
-        console.log(`[Gate] CRM action ${action_id} executed via RapidoCRM MCP`);
+        const channel =
+          action.tool === "calendar_create_event"
+            ? "Google Calendar API"
+            : "RapidoCRM MCP";
+        console.log(`[Gate] Action ${action_id} executed via ${channel}`);
         progressBus.emit({
           sessionId: session_id,
           step: 'action',
           message: `Completed: ${action.tool.replace(/_/g, ' ')}`,
           progress: 98,
-          detail: 'Executed after approval via RapidoCRM MCP',
+          detail: `Executed after approval via ${channel}`,
         });
       } else {
         action.execution_status = "failed";
-        console.error(`[Gate] CRM action ${action_id} failed:`, execResult.error);
+        action.status = "pending";
+        console.error(`[Gate] Action ${action_id} failed:`, execResult.error);
         progressBus.emit({
           sessionId: session_id,
           step: 'error',
@@ -554,7 +586,8 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
       }
     } catch (err) {
       action.execution_status = "failed";
-      console.error(`[Gate] CRM execution error for ${action_id}:`, (err as Error).message);
+      action.status = "pending";
+      console.error(`[Gate] Execution error for ${action_id}:`, (err as Error).message);
     }
   }
 
@@ -562,11 +595,24 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
 
   if (stillPending.length === 0) {
     session.status = 'complete';
+    await syncMeetingToSupabase(session, "completed");
     progressBus.emit({
       sessionId: session_id,
       step: 'complete',
+      state: 'complete',
       message: 'All actions approved — meeting processing complete',
       progress: 100,
+    });
+  } else {
+    session.status = "awaiting_confirmation";
+    progressBus.emit({
+      sessionId: session_id,
+      step: "confirmation",
+      state: "awaiting_confirmation",
+      message: `${stillPending.length} action${stillPending.length === 1 ? "" : "s"} still waiting for your approval`,
+      progress: 95,
+      detail: stillPending.map((a) => a.tool).join(", "),
+      pending_actions: stillPending.map(formatPendingAction),
     });
   }
 
@@ -590,6 +636,11 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
     action_id,
     decision: action.status,
     still_pending: stillPending.length,
+    pending_actions: stillPending.map(formatPendingAction),
+    confirmation_actions: (session.actions ?? [])
+      .filter((a) => a.requiresConfirmation)
+      .map(formatConfirmationAction),
+    session_status: session.status,
   });
 }
 
@@ -609,7 +660,17 @@ app.get("/session/:id", authMiddleware, async (req: Request, res: Response) => {
     });
   }
 
-  return res.json(session);
+  const pendingCritical = getPendingCriticalActions(session.actions);
+  const confirmationActions = (session.actions ?? [])
+    .filter((a) => a.requiresConfirmation)
+    .map(formatConfirmationAction);
+
+  return res.json({
+    ...session,
+    meeting_id: session.meetingId ?? null,
+    pending_actions: pendingCritical.map(formatPendingAction),
+    confirmation_actions: confirmationActions,
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

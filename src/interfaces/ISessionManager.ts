@@ -30,27 +30,4 @@ export interface ISessionManager {
    * Returns null if the session expired (TTL passed) or never existed.
    */
   load(sessionId: string): Promise<ISessionContext | null>;
-
-  /**
-   * Updates only the status field without loading/saving the whole session.
-   * Used by the Confirmation Gate to quickly flip status.
-   */
-  updateStatus(
-    sessionId: string,
-    status:    ISessionContext["status"]
-  ): Promise<void>;
-
-  /**
-   * Removes a session from Redis.
-   * Called after the session is saved to PostgreSQL in memory.ts.
-   */
-  delete(sessionId: string): Promise<void>;
 }
-
-// SECTION 3 — TRANSCRIPTION (transcribe.ts)
-// Converts audio to structured text with speaker identification.
-
-/**
- * One segment of speech from one identified speaker.
- * Example: { speaker: "Speaker 0", text: "On va commencer...", start: 0, end: 4.2 }
- */

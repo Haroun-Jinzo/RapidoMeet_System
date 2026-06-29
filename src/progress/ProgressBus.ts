@@ -17,6 +17,14 @@ export interface ProgressEvent {
   detail?: string;
   error?: string;
   timestamp: string;
+  state?: string;
+  pending_actions?: Array<{
+    id: string;
+    title: string;
+    summary?: string;
+    destination?: string;
+    action_type?: string;
+  }>;
 }
 
 export type ProgressSubscriber = (event: ProgressEvent) => void;
@@ -28,6 +36,8 @@ export interface ProgressEmitInput {
   progress: number;
   detail?: string;
   error?: string;
+  state?: string;
+  pending_actions?: ProgressEvent["pending_actions"];
 }
 
 const TERMINAL_STEPS = new Set<ProgressStep>(["complete", "error"]);

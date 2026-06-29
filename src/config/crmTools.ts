@@ -255,13 +255,3 @@ export function buildCrmGeminiDeclarations(): Record<string, unknown>[] {
 
   return declarations;
 }
-
-/** Export n8n route map as JSON-friendly object for documentation */
-export function buildN8nRouteMap(): Record<string, CrmRouteConfig> {
-  const map: Record<string, CrmRouteConfig> = {};
-  for (const tool of ALL_CRM_TOOL_NAMES) {
-    const route = getCrmRouteConfig(tool);
-    if (route) map[tool] = route;
-  }
-  return map;
-}

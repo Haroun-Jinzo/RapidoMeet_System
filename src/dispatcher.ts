@@ -20,6 +20,17 @@ import { isCrmTool } from "./config/crmTools";
 import { mapCrmMcpArguments, resolveCrmMcpToolName } from "./config/crmMcpToolMap";
 import { progressBus, actionProgressPercent } from "./progress/ProgressBus";
 import { connectionsStore } from "./integrations/ConnectionsStore";
+import { googleCalendarClient, GoogleCalendarEventParams } from "./integrations/GoogleCalendarClient";
+import {
+  getConfirmationPreferences,
+  shouldSendTelegramConfirmation,
+} from "./integrations/confirmationPreferences";
+import { TELEGRAM_PROVIDER, getFrontendUrl } from "./auth/telegramConfig";
+import {
+  buildConfirmationMessage,
+  sendTelegramMessage,
+} from "./integrations/TelegramClient";
+import { formatPendingAction } from "./utils/pendingActionFormatter";
 
 export interface ExecuteAllContext {
   userId: string;
@@ -45,7 +56,7 @@ class MCPDispatcher implements IMCPDispatcher {
 
     const n8nApiKey = apiKeys?.n8n || process.env.N8N_API_KEY;
 
-    if (!isCrmTool(action.tool) && action.tool !== "db_save_task") {
+    if (!isCrmTool(action.tool) && action.tool !== "db_save_task" && action.tool !== "telegram_send_confirmation" && action.tool !== "calendar_create_event") {
       if (!this.n8nClients.has(n8nApiKey as string)) {
         await this.initN8nClient(n8nApiKey as string);
       }
@@ -73,6 +84,10 @@ class MCPDispatcher implements IMCPDispatcher {
         console.warn(
           `[Dispatcher] Attempt ${attempt}/${maxRetries} failed for ${action.tool}: ${lastError}`
         );
+
+        if (this.isNonRetryableError(lastError)) {
+          break;
+        }
 
         if (attempt < maxRetries) {
           const waitMs = Math.pow(2, attempt) * 1000;
@@ -152,32 +167,50 @@ class MCPDispatcher implements IMCPDispatcher {
       }
     }
 
+    const queuedPending: ReturnType<typeof formatPendingAction>[] = [];
+
     for (const criticalAction of critical) {
       console.log(
-        `[Dispatcher] Critical action [${criticalAction.tool}] — saving to pending_actions and notifying via Telegram`
+        `[Dispatcher] Critical action [${criticalAction.tool}] — saving to pending_actions`
       );
 
       const actionParams = { ...criticalAction.params };
+      const userId = context?.userId;
+      const pendingSummary = formatPendingAction(criticalAction);
+      queuedPending.push(pendingSummary);
 
       if (isCrmTool(criticalAction.tool)) {
-        const connected = context?.userId
-          ? await connectionsStore.hasActiveConnection(context.userId, "rapidocrm")
+        const connected = userId
+          ? await connectionsStore.hasActiveConnection(userId, "rapidocrm")
           : false;
 
         if (!connected) {
           console.error(
             `[Dispatcher] RapidoCRM OAuth not connected for ${criticalAction.id} ` +
-              `(user ${context?.userId ?? "unknown"}) — connect in Settings → Integrations`
+              `(user ${userId ?? "unknown"}) — connect in Settings → Integrations`
           );
         }
       }
 
-      if (context?.userId) {
+      if (criticalAction.tool === "calendar_create_event") {
+        const connected = userId
+          ? await connectionsStore.hasActiveConnection(userId, "google_calendar")
+          : false;
+
+        if (!connected) {
+          console.error(
+            `[Dispatcher] Google Calendar OAuth not connected for ${criticalAction.id} ` +
+              `(user ${userId ?? "unknown"}) — connect in Settings → Integrations`
+          );
+        }
+      }
+
+      if (userId) {
         try {
           await memoryManager.savePendingAction({
             actionId: criticalAction.id,
             sessionId,
-            userId: context.userId,
+            userId,
             actionTool: criticalAction.tool,
             params: actionParams,
             status: "pending",
@@ -194,54 +227,94 @@ class MCPDispatcher implements IMCPDispatcher {
         );
       }
 
-      const details = JSON.stringify(actionParams, null, 2);
-      const approvalMessage =
-        `🚨 *Requires Approval*\n\nAction: ${criticalAction.tool}\n\nDetails:\n${details}`;
+      criticalAction.status = "pending";
 
-      const telegramAction: IAction = {
-        id: `tg_alert_${criticalAction.id}`,
-        tool: "telegram_send_confirmation",
-        params: {
-          session_id: sessionId,
-          action_id: criticalAction.id,
-          user_id: context?.userId,
-          action_type: criticalAction.tool,
-          action_tool: criticalAction.tool,
-          action_params: actionParams,
-          action_description: details,
-          payload: {
-            action_id: criticalAction.id,
-            session_id: sessionId,
-            params: actionParams,
-            message: approvalMessage,
-          },
-          message: approvalMessage,
-        },
-        requiresConfirmation: false,
-        status: "pending",
-      };
+      const prefs = userId
+        ? await getConfirmationPreferences(userId)
+        : { channel: "in_app" as const };
+      const hasTelegram = userId
+        ? await connectionsStore.hasActiveConnection(userId, TELEGRAM_PROVIDER)
+        : false;
+      const sendTelegram = userId
+        ? shouldSendTelegramConfirmation(prefs, hasTelegram)
+        : false;
 
-      const tgResult = await this.execute(telegramAction, apiKeys);
-      results.push(tgResult);
+      let telegramSent = false;
+      let telegramError: string | undefined;
 
-      if (tgResult.success) {
+      if (sendTelegram && userId) {
+        const telegram = await connectionsStore.getTelegramConnection(userId);
+        if (telegram) {
+          const details = JSON.stringify(actionParams, null, 2);
+          const message = buildConfirmationMessage({
+            actionTool: criticalAction.tool,
+            actionId: criticalAction.id,
+            sessionId,
+            details,
+            frontendUrl: getFrontendUrl(),
+          });
+
+          const tgResult = await sendTelegramMessage(
+            { botToken: telegram.botToken, chatId: telegram.chatId },
+            message
+          );
+
+          telegramSent = tgResult.success;
+          telegramError = tgResult.error;
+
+          results.push({
+            actionId: `tg_alert_${criticalAction.id}`,
+            success: tgResult.success,
+            result: tgResult.success ? "Telegram confirmation sent" : undefined,
+            error: tgResult.error,
+            retries: 0,
+          });
+        } else {
+          telegramError = "Telegram credentials missing — reconnect in Settings.";
+        }
+      }
+
+      const inAppAvailable = prefs.channel !== "telegram";
+      const confirmationReady = inAppAvailable || telegramSent;
+
+      if (confirmationReady) {
+        const detailParts = ["Approve in the RapidoMeet pipeline panel"];
+        if (telegramSent) detailParts.unshift("Telegram notification sent");
+        if (telegramError && sendTelegram) {
+          detailParts.push(`Telegram: ${telegramError}`);
+        }
+
         progressBus.emit({
           sessionId,
           step: "confirmation",
+          state: "awaiting_confirmation",
           message: `Awaiting approval: ${criticalAction.tool.replace(/_/g, " ")}`,
           progress: actionProgressPercent(actionIndex, totalActions),
-          detail: "Approve via Telegram or the app to execute this action",
+          detail: detailParts.join(" · "),
+          pending_actions: [...queuedPending],
         });
-        criticalAction.status = "pending";
       } else {
         emitActionProgress(
           criticalAction.tool,
           false,
-          tgResult.error,
-          tgResult.error
+          telegramError,
+          telegramError || "No confirmation channel configured"
         );
       }
+
       actionIndex += 1;
+    }
+
+    if (queuedPending.length > 0) {
+      progressBus.emit({
+        sessionId,
+        step: "confirmation",
+        state: "awaiting_confirmation",
+        message: `${queuedPending.length} action${queuedPending.length === 1 ? "" : "s"} waiting for your approval`,
+        progress: actionProgressPercent(Math.max(actionIndex - 1, 0), totalActions),
+        detail: queuedPending.map((a) => a.action_type || a.title).join(", "),
+        pending_actions: [...queuedPending],
+      });
     }
 
     return results;
@@ -332,6 +405,21 @@ class MCPDispatcher implements IMCPDispatcher {
     return msg.includes("401") || msg.includes("unauthorized") || msg.includes("authentication");
   }
 
+  /** Permission / scope / validation errors won't succeed on retry — fail fast. */
+  private isNonRetryableError(message: string): boolean {
+    const lower = message.toLowerCase();
+    return (
+      lower.includes("insufficient") ||
+      lower.includes("scope_insufficient") ||
+      lower.includes("missing the calendar permission") ||
+      lower.includes("not connected") ||
+      lower.includes("sont requis") ||
+      lower.includes("requires a company name") ||
+      lower.includes("requires ") ||
+      lower.includes("manquant")
+    );
+  }
+
   /** RapidoCRM tools may return HTTP 200 with JSON { success: false } in content text. */
   private assertCrmToolSucceeded(result: {
     content?: unknown;
@@ -383,6 +471,81 @@ class MCPDispatcher implements IMCPDispatcher {
         };
       } catch (error) {
         throw new Error(`Failed to save task in local memory: ${(error as Error).message}`);
+      }
+    }
+
+    if (action.tool === "telegram_send_confirmation") {
+      const userId =
+        (action.params.user_id as string | undefined) ||
+        (action.params.userId as string | undefined);
+      const message =
+        (action.params.message as string | undefined) ||
+        (action.params.action_description as string | undefined) ||
+        "Action requires your approval.";
+
+      if (userId) {
+        const telegram = await connectionsStore.getTelegramConnection(userId);
+        if (telegram) {
+          const result = await sendTelegramMessage(
+            { botToken: telegram.botToken, chatId: telegram.chatId },
+            message
+          );
+          if (!result.success) {
+            throw new Error(result.error || "Failed to send Telegram confirmation");
+          }
+          return {
+            _mcpStatus: "success",
+            tool: action.tool,
+            content: [{ type: "text", text: "Telegram confirmation sent" }],
+          };
+        }
+      }
+
+      const envToken = process.env.TELEGRAM_BOT_TOKEN;
+      const envChatId = process.env.TELEGRAM_CHAT_ID;
+      if (envToken && envChatId) {
+        const result = await sendTelegramMessage(
+          { botToken: envToken, chatId: envChatId },
+          message
+        );
+        if (!result.success) {
+          throw new Error(result.error || "Failed to send Telegram confirmation");
+        }
+        return {
+          _mcpStatus: "success",
+          tool: action.tool,
+          content: [{ type: "text", text: "Telegram confirmation sent (global bot)" }],
+        };
+      }
+
+      throw new Error(
+        "Telegram is not configured. Connect your bot in Settings → Integrations."
+      );
+    }
+
+    if (action.tool === "calendar_create_event") {
+      const userId = action.params.userId as string | undefined;
+      if (!userId) {
+        throw new Error("Missing userId on calendar action — cannot resolve OAuth token.");
+      }
+
+      try {
+        const event = await googleCalendarClient.createEvent(userId, {
+          ...(action.params as Record<string, unknown>),
+        } as GoogleCalendarEventParams);
+
+        const message = `Calendar event created: ${event.summary}${event.htmlLink ? ` — ${event.htmlLink}` : ""}`;
+
+        console.log(`[Google Calendar] ${message}`);
+
+        return {
+          _mcpStatus: "success",
+          tool: action.tool,
+          content: [{ type: "text", text: message }],
+          event,
+        };
+      } catch (error) {
+        throw new Error((error as Error).message);
       }
     }
 
@@ -439,8 +602,6 @@ class MCPDispatcher implements IMCPDispatcher {
         name: action.tool,
         arguments: action.params as Record<string, unknown>,
       });
-
-      console.log(`[N8N RESPONSE for ${action.tool}]:`, JSON.stringify(result, null, 2));
 
       return {
         _mcpStatus: "success",

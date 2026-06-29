@@ -1,6 +1,7 @@
 import { MeetingType } from "./MeetingType";
 import { INLPOutput } from "./INLPOutput";
 import { IAction } from "./IAction";
+import { ISpeakerSegment } from "./ISpeakerSegment";
 
 /**
  * A session is the central object that travels through the entire pipeline.
@@ -12,6 +13,7 @@ import { IAction } from "./IAction";
 export interface ISessionContext {
   id:            string;        // Unique ID e.g. "sess_20260314_startupx"
   userId:        string;        // Supabase user ID of who started the session
+  meetingId?:    string;        // RapidoMeet meetings.id (from upload / bot job)
   meetingTitle:  string;        // Human readable title e.g. "Réunion StartupX"
   meetingType:   MeetingType;   // Determines which Skill .md is loaded
   participants:  string[];      // Email list of meeting participants
@@ -27,6 +29,8 @@ export interface ISessionContext {
   // extract.ts fills in extraction
   // router.ts fills in actions
   transcript?:   string;
+  transcriptionSegments?: ISpeakerSegment[];
+  durationSeconds?: number;
   extraction?:   INLPOutput;
   actions?:      IAction[];
 }
