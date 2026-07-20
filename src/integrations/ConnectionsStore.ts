@@ -6,6 +6,18 @@ import {
   validateMcpUrl,
 } from "../auth/crmOAuthConfig";
 import {
+  buildTokenRequestHeaders as buildCmsTokenRequestHeaders,
+  getCmsOAuthConfig,
+  RAPIDOCMS_PROVIDER,
+  validateMcpUrl as validateCmsMcpUrl,
+} from "../auth/cmsOAuthConfig";
+import {
+  buildRhTokenRequestHeaders,
+  getRhOAuthConfig,
+  RAPIDORH_PROVIDER,
+  validateRhMcpUrl,
+} from "../auth/rhOAuthConfig";
+import {
   getGoogleOAuthConfig,
   GOOGLE_CALENDAR_PROVIDER,
 } from "../auth/googleOAuthConfig";
@@ -58,6 +70,9 @@ export interface CRMConnectionContext {
   connectionId: string;
 }
 
+export type CMSConnectionContext = CRMConnectionContext;
+export type RHConnectionContext = CRMConnectionContext;
+
 export interface GoogleCalendarConnectionContext {
   accessToken: string;
   connectionId: string;
@@ -73,6 +88,8 @@ export interface TelegramConnectionContext {
 function accountLabelForProvider(provider: string): string {
   if (provider === GOOGLE_CALENDAR_PROVIDER) return "Google Calendar";
   if (provider === RAPIDOCRM_PROVIDER) return "RapidoCRM";
+  if (provider === RAPIDOCMS_PROVIDER) return "RapidoCMS";
+  if (provider === RAPIDORH_PROVIDER) return "Rapido RH";
   if (provider === TELEGRAM_PROVIDER) return "Telegram";
   return provider;
 }
@@ -199,6 +216,24 @@ export class ConnectionsStore {
     return config.defaultMcpUrl;
   }
 
+  resolveCmsMcpUrl(metadata?: Record<string, unknown> | null): string {
+    const config = getCmsOAuthConfig();
+    const fromMeta = metadata?.mcp_url;
+    if (typeof fromMeta === "string" && fromMeta.trim()) {
+      return fromMeta.trim().replace(/\/$/, "");
+    }
+    return config.defaultMcpUrl;
+  }
+
+  resolveRhMcpUrl(metadata?: Record<string, unknown> | null): string {
+    const config = getRhOAuthConfig();
+    const fromMeta = metadata?.mcp_url;
+    if (typeof fromMeta === "string" && fromMeta.trim()) {
+      return fromMeta.trim().replace(/\/$/, "");
+    }
+    return config.defaultMcpUrl;
+  }
+
   async storeOAuthTokens(
     userId: string,
     provider: string,
@@ -229,6 +264,24 @@ export class ConnectionsStore {
     if (provider === RAPIDOCRM_PROVIDER) {
       const config = getCrmOAuthConfig();
       configPatch.mcp_url = this.resolveMcpUrl({
+        ...(existing?.metadata ?? {}),
+        mcp_url:
+          extraMetadata?.mcp_url ?? existing?.metadata?.mcp_url ?? config.defaultMcpUrl,
+      });
+    }
+
+    if (provider === RAPIDOCMS_PROVIDER) {
+      const config = getCmsOAuthConfig();
+      configPatch.mcp_url = this.resolveCmsMcpUrl({
+        ...(existing?.metadata ?? {}),
+        mcp_url:
+          extraMetadata?.mcp_url ?? existing?.metadata?.mcp_url ?? config.defaultMcpUrl,
+      });
+    }
+
+    if (provider === RAPIDORH_PROVIDER) {
+      const config = getRhOAuthConfig();
+      configPatch.mcp_url = this.resolveRhMcpUrl({
         ...(existing?.metadata ?? {}),
         mcp_url:
           extraMetadata?.mcp_url ?? existing?.metadata?.mcp_url ?? config.defaultMcpUrl,
@@ -318,6 +371,40 @@ export class ConnectionsStore {
     };
   }
 
+  async getCMSConnection(userId: string): Promise<CMSConnectionContext> {
+    const accessToken = await this.getCMSAccessToken(userId);
+    const conn = await this.getUserConnection(userId, RAPIDOCMS_PROVIDER);
+
+    if (!conn || !isConnectedStatus(conn.status)) {
+      throw new Error(
+        "RapidoCMS is not connected. Go to Settings → Integrations and connect your CMS account."
+      );
+    }
+
+    return {
+      accessToken,
+      mcpUrl: this.resolveCmsMcpUrl(conn.metadata),
+      connectionId: conn.id,
+    };
+  }
+
+  async getRHConnection(userId: string): Promise<RHConnectionContext> {
+    const accessToken = await this.getRHAccessToken(userId);
+    const conn = await this.getUserConnection(userId, RAPIDORH_PROVIDER);
+
+    if (!conn || !isConnectedStatus(conn.status)) {
+      throw new Error(
+        "Rapido RH is not connected. Go to Settings → Integrations and connect your RH account."
+      );
+    }
+
+    return {
+      accessToken,
+      mcpUrl: this.resolveRhMcpUrl(conn.metadata),
+      connectionId: conn.id,
+    };
+  }
+
   async getCRMAccessToken(userId: string): Promise<string> {
     const conn = await this.getUserConnection(userId, RAPIDOCRM_PROVIDER);
 
@@ -397,6 +484,170 @@ export class ConnectionsStore {
       .eq("id", connectionId);
 
     console.log(`[ConnectionsStore] Refreshed RapidoCRM token for user ${userId}`);
+    return updated.access_token;
+  }
+
+  async getCMSAccessToken(userId: string): Promise<string> {
+    const conn = await this.getUserConnection(userId, RAPIDOCMS_PROVIDER);
+
+    if (!conn || !isConnectedStatus(conn.status)) {
+      throw new Error(
+        "RapidoCMS is not connected. Go to Settings → Integrations and connect your CMS account."
+      );
+    }
+
+    const tokens = await this.readOAuthTokens(conn.id);
+    if (!tokens) {
+      throw new Error("RapidoCMS credentials missing. Please reconnect.");
+    }
+
+    const refreshBufferMs = 5 * 60 * 1000;
+    if (Date.now() + refreshBufferMs >= tokens.expires_at) {
+      return this.refreshCMSToken(userId, conn.id, tokens);
+    }
+
+    return tokens.access_token;
+  }
+
+  private async refreshCMSToken(
+    userId: string,
+    connectionId: string,
+    currentTokens: OAuthTokenPayload
+  ): Promise<string> {
+    const config = getCmsOAuthConfig();
+
+    if (!config.clientId) {
+      throw new Error("RAPIDOCMS_CLIENT_ID is not configured on the server.");
+    }
+
+    if (!currentTokens.refresh_token) {
+      await this.markConnectionExpired(connectionId);
+      throw new Error(
+        "RapidoCMS session expired and no refresh token is available. Please reconnect in Settings."
+      );
+    }
+
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: currentTokens.refresh_token,
+      client_id: config.clientId,
+      scope: config.scope,
+    });
+
+    const response = await fetch(config.tokenUrl, {
+      method: "POST",
+      headers: buildCmsTokenRequestHeaders(config.clientId, config.clientSecret),
+      body,
+    });
+
+    const data = (await response.json()) as Record<string, unknown>;
+
+    if (!response.ok) {
+      console.error("[ConnectionsStore] CMS token refresh failed:", data);
+      await this.markConnectionExpired(connectionId);
+      throw new Error(
+        "RapidoCMS session expired. Please reconnect your account in Settings → Integrations."
+      );
+    }
+
+    const expiresIn = typeof data.expires_in === "number" ? data.expires_in : 3600;
+    const updated: OAuthTokenPayload = {
+      access_token: String(data.access_token),
+      refresh_token: String(data.refresh_token ?? currentTokens.refresh_token),
+      token_type: String(data.token_type ?? currentTokens.token_type ?? "Bearer"),
+      expires_at: Date.now() + expiresIn * 1000,
+    };
+
+    await this.writeEncryptedCredentials(connectionId, JSON.stringify(updated));
+
+    await supabaseService
+      .from("user_connections")
+      .update({ updated_at: new Date().toISOString() })
+      .eq("id", connectionId);
+
+    console.log(`[ConnectionsStore] Refreshed RapidoCMS token for user ${userId}`);
+    return updated.access_token;
+  }
+
+  async getRHAccessToken(userId: string): Promise<string> {
+    const conn = await this.getUserConnection(userId, RAPIDORH_PROVIDER);
+
+    if (!conn || !isConnectedStatus(conn.status)) {
+      throw new Error(
+        "Rapido RH is not connected. Go to Settings → Integrations and connect your RH account."
+      );
+    }
+
+    const tokens = await this.readOAuthTokens(conn.id);
+    if (!tokens) {
+      throw new Error("Rapido RH credentials missing. Please reconnect.");
+    }
+
+    const refreshBufferMs = 5 * 60 * 1000;
+    if (Date.now() + refreshBufferMs >= tokens.expires_at) {
+      return this.refreshRHToken(userId, conn.id, tokens);
+    }
+
+    return tokens.access_token;
+  }
+
+  private async refreshRHToken(
+    userId: string,
+    connectionId: string,
+    currentTokens: OAuthTokenPayload
+  ): Promise<string> {
+    const config = getRhOAuthConfig();
+
+    if (!config.clientId) {
+      throw new Error("RAPIDORH_CLIENT_ID is not configured on the server.");
+    }
+
+    if (!currentTokens.refresh_token) {
+      await this.markConnectionExpired(connectionId);
+      throw new Error(
+        "Rapido RH session expired and no refresh token is available. Please reconnect in Settings."
+      );
+    }
+
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: currentTokens.refresh_token,
+      client_id: config.clientId,
+      scope: config.scope,
+    });
+
+    const response = await fetch(config.tokenUrl, {
+      method: "POST",
+      headers: buildRhTokenRequestHeaders(config.clientId, config.clientSecret),
+      body,
+    });
+
+    const data = (await response.json()) as Record<string, unknown>;
+
+    if (!response.ok) {
+      console.error("[ConnectionsStore] RH token refresh failed:", data);
+      await this.markConnectionExpired(connectionId);
+      throw new Error(
+        "Rapido RH session expired. Please reconnect your account in Settings → Integrations."
+      );
+    }
+
+    const expiresIn = typeof data.expires_in === "number" ? data.expires_in : 3600;
+    const updated: OAuthTokenPayload = {
+      access_token: String(data.access_token),
+      refresh_token: String(data.refresh_token ?? currentTokens.refresh_token),
+      token_type: String(data.token_type ?? currentTokens.token_type ?? "Bearer"),
+      expires_at: Date.now() + expiresIn * 1000,
+    };
+
+    await this.writeEncryptedCredentials(connectionId, JSON.stringify(updated));
+
+    await supabaseService
+      .from("user_connections")
+      .update({ updated_at: new Date().toISOString() })
+      .eq("id", connectionId);
+
+    console.log(`[ConnectionsStore] Refreshed Rapido RH token for user ${userId}`);
     return updated.access_token;
   }
 
@@ -529,6 +780,16 @@ export class ConnectionsStore {
   async updateMcpUrl(userId: string, mcpUrl: string): Promise<ConnectionRecord> {
     const validated = validateMcpUrl(mcpUrl);
     return this.updateConnectionMetadata(userId, RAPIDOCRM_PROVIDER, { mcp_url: validated });
+  }
+
+  async updateCmsMcpUrl(userId: string, mcpUrl: string): Promise<ConnectionRecord> {
+    const validated = validateCmsMcpUrl(mcpUrl);
+    return this.updateConnectionMetadata(userId, RAPIDOCMS_PROVIDER, { mcp_url: validated });
+  }
+
+  async updateRhMcpUrl(userId: string, mcpUrl: string): Promise<ConnectionRecord> {
+    const validated = validateRhMcpUrl(mcpUrl);
+    return this.updateConnectionMetadata(userId, RAPIDORH_PROVIDER, { mcp_url: validated });
   }
 
   async touchConnection(connectionId: string): Promise<void> {

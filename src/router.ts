@@ -28,6 +28,10 @@ import {
   CIRCUIT_BREAKER_CONFIG,
 } from "./config/services";
 import { buildCrmToolsPromptTable, crmToolSortIndex } from "./config/crmTools";
+import { buildCmsToolsPromptTable } from "./config/cmsTools";
+import { buildRhToolsPromptTable } from "./config/rhTools";
+import { isCmsTool } from "./config/cmsTools";
+import { isRhTool } from "./config/rhTools";
 import { ALL_MCP_TOOL_NAMES } from "./interfaces/MCPTool";
 
 // ============================================================================
@@ -38,8 +42,19 @@ const ROUTABLE_TOOLS = ALL_MCP_TOOL_NAMES.filter(
   (t) => t !== "telegram_send_confirmation"
 );
 
+const knownRoutableTools = new Set<string>(ROUTABLE_TOOLS as unknown as string[]);
+
+function isRoutableToolName(tool: string): boolean {
+  return (
+    knownRoutableTools.has(tool) ||
+    tool.startsWith("cms_") ||
+    tool.startsWith("rh_") ||
+    tool.startsWith("crm_")
+  );
+}
+
 const ActionDecisionSchema = z.object({
-  tool: z.enum(ROUTABLE_TOOLS as unknown as [string, ...string[]]),
+  tool: z.string().refine(isRoutableToolName, { message: "Unknown MCP tool" }),
   params:               z.record(z.string(), z.unknown()),
   requiresConfirmation: z.boolean(),
   reason:               z.string(),
@@ -237,6 +252,8 @@ User Instructions: ${userInstructions ? `Apply these instructions strictly! If a
 | Tool | What it does | Risk level |
 |------|-------------|------------|
 ${buildCrmToolsPromptTable()}
+${buildCmsToolsPromptTable()}
+${buildRhToolsPromptTable()}
 | calendar_create_event | Creates a Google Calendar event | HIGH — irreversible |
 | email_send_recap | Sends the meeting recap email to participants | LOW — informational |
 | db_save_task | Saves an action item to the task database | LOW — easily deleted |
@@ -247,10 +264,12 @@ ${buildCrmToolsPromptTable()}
 requiresConfirmation MUST be true for:
 - All crm_create_*, crm_update_*, crm_delete_* tools (permanent CRM mutations)
 - crm_create_opportunity
+- All cms_create_*, cms_edit_*, cms_delete_*, cms_add_*, cms_schedule_* tools
+- All rh_create_*, rh_update_*, rh_delete_*, rh_log_* tools
 - calendar_create_event
 
 requiresConfirmation MUST be false for:
-- All crm_read_* tools (read-only)
+- All crm_read_*, cms_list_*, cms_get_*, rh_list_*, rh_get_* tools (read-only)
 - email_send_recap, db_save_task, crm_log_activity
 
 ## Decision Rules
@@ -260,12 +279,14 @@ requiresConfirmation MUST be false for:
 3. Use crm_update_* only when modifying an existing record with a known ID
 4. Use crm_delete_* only when the user explicitly requests deletion
 5. Use crm_read_* only when information from CRM is needed to complete another action
-6. Create calendar_create_event if a task or decision mentions scheduling a meeting, a call, or an event in the future.
-7. Always create email_send_recap at end (last action). For "target_email", you MUST extract the actual email address provided by the user in the Instructions above. NEVER output null or placeholder text.
-8. In your Output Format, replace all example values with real data extracted from the meeting and instructions.
-9. Only create crm_log_activity if CRM contact exists
-10. Don't create actions for vague/uncertain information
-11. Keep params concise — only use explicit information
+6. Use cms_* tools when the meeting discusses social posts, campaigns, drafts, digital cards, or CMS content
+7. Use rh_* tools when the meeting discusses HR topics (leave/congés, employees, onboarding)
+8. Create calendar_create_event if a task or decision mentions scheduling a meeting, a call, or an event in the future.
+9. Always create email_send_recap at end (last action). For "target_email", you MUST extract the actual email address provided by the user in the Instructions above. NEVER output null or placeholder text.
+10. In your Output Format, replace all example values with real data extracted from the meeting and instructions.
+11. Only create crm_log_activity if CRM contact exists
+12. Don't create actions for vague/uncertain information
+13. Keep params concise — only use explicit information
 
 Return ONLY valid JSON object.
 `.trim();
@@ -441,11 +462,14 @@ Return ONLY the JSON object.
     ];
 
     return actions.sort((a, b) => {
-      const ai = a.tool.startsWith("crm_") ? crmToolSortIndex(a.tool) : nonCrmOrder.indexOf(a.tool);
-      const bi = b.tool.startsWith("crm_") ? crmToolSortIndex(b.tool) : nonCrmOrder.indexOf(b.tool);
-      const aIdx = ai === -1 ? 900 : ai;
-      const bIdx = bi === -1 ? 900 : bi;
-      return aIdx - bIdx;
+      const sortIndex = (tool: string): number => {
+        if (tool.startsWith("crm_")) return crmToolSortIndex(tool);
+        if (isCmsTool(tool)) return 300 + (tool.includes("list_") || tool.includes("get_") ? 0 : 10);
+        if (isRhTool(tool)) return 400 + (tool.includes("list_") || tool.includes("get_") ? 0 : 10);
+        const idx = nonCrmOrder.indexOf(tool as MCPTool);
+        return idx === -1 ? 900 : 500 + idx;
+      };
+      return sortIndex(a.tool) - sortIndex(b.tool);
     });
   }
 }

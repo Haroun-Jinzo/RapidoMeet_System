@@ -7,6 +7,8 @@
  */
 
 import { isCrmCriticalTool, isCrmReadTool } from "./crmTools";
+import { isCmsCriticalTool, isCmsReadTool } from "./cmsTools";
+import { isRhCriticalTool, isRhReadTool } from "./rhTools";
 
 // ============================================================================
 
@@ -25,10 +27,10 @@ export const NEVER_CRITICAL_TOOLS = new Set<string>([
   "crm_log_activity",
 ]);
 
-/** Classify CRM tools dynamically (create/update/delete = critical, read = safe) */
+/** Classify CRM/CMS/RH tools dynamically (writes = critical, reads = safe) */
 export function requiresConfirmationForTool(tool: string, geminiSays?: boolean): boolean {
-  if (isCrmCriticalTool(tool)) return true;
-  if (isCrmReadTool(tool)) return false;
+  if (isCrmCriticalTool(tool) || isCmsCriticalTool(tool) || isRhCriticalTool(tool)) return true;
+  if (isCrmReadTool(tool) || isCmsReadTool(tool) || isRhReadTool(tool)) return false;
   if (ALWAYS_CRITICAL_TOOLS.has(tool)) return true;
   if (NEVER_CRITICAL_TOOLS.has(tool)) return false;
   return geminiSays ?? false;

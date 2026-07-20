@@ -28,9 +28,13 @@ import multer from "multer";
 import { progressBus } from "./progress/ProgressBus";
 import { streamSessionProgress } from "./progress/sse";
 import { crmOAuthRouter } from "./auth/crmOAuthRouter";
+import { cmsOAuthRouter } from "./auth/cmsOAuthRouter";
+import { rhOAuthRouter } from "./auth/rhOAuthRouter";
 import { googleOAuthRouter } from "./auth/googleOAuthRouter";
 import { telegramRouter } from "./auth/telegramRouter";
 import { isCrmTool } from "./config/crmTools";
+import { isCmsTool } from "./config/cmsTools";
+import { isRhTool } from "./config/rhTools";
 import { mergeActionStatuses } from "./utils/mergeActionStatuses";
 import { formatPendingAction, formatConfirmationAction } from "./utils/pendingActionFormatter";
 import { IAction, ISessionContext } from "./interfaces";
@@ -130,22 +134,13 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
 
-// Simple request logger for debugging uploads
-app.use((req, res, next) => {
-  if (req.path === '/upload-meeting') {
-    console.log('[Request] Incoming upload:', req.method, req.path, 'headers:', {
-      'x-internal-auth': req.headers['x-internal-auth'],
-      'x-internal-user-id': req.headers['x-internal-user-id'],
-    });
-  }
-  next();
-});
-
 // Internal routes (OpenClaw -> RapidoMeet via shared secret)
 app.use('/internal', internalRouter);
 
 // RapidoCRM OAuth2 + PKCE (public client — no client_secret required)
 app.use('/auth/crm', crmOAuthRouter);
+app.use('/auth/cms', cmsOAuthRouter);
+app.use('/auth/rh', rhOAuthRouter);
 app.use('/auth/google', googleOAuthRouter);
 app.use('/auth/telegram', telegramRouter);
 
@@ -547,10 +542,13 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
     console.warn(`[Gate] pending_actions update failed for ${action_id}:`, (err as Error).message);
   }
 
-  // CRM / Google Calendar: execute directly after approval — no n8n hop.
+  // CRM / CMS / RH / Google Calendar: execute directly after approval — no n8n hop.
   const runsOnConfirm =
     decision === "confirm" &&
-    (isCrmTool(action.tool) || action.tool === "calendar_create_event");
+    (isCrmTool(action.tool) ||
+      isCmsTool(action.tool) ||
+      isRhTool(action.tool) ||
+      action.tool === "calendar_create_event");
 
   if (runsOnConfirm) {
     try {
@@ -563,7 +561,11 @@ async function handleActionDecision(req: Request, res: Response, decision: 'conf
         const channel =
           action.tool === "calendar_create_event"
             ? "Google Calendar API"
-            : "RapidoCRM MCP";
+            : isCmsTool(action.tool)
+              ? "RapidoCMS MCP"
+              : isRhTool(action.tool)
+                ? "Rapido RH MCP"
+                : "RapidoCRM MCP";
         console.log(`[Gate] Action ${action_id} executed via ${channel}`);
         progressBus.emit({
           sessionId: session_id,

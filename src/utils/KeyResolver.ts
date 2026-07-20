@@ -69,8 +69,8 @@ async function getDecryptedCredentials(userId: string, integrationId: string): P
   }
 }
 
-// Control logging: set LOG_KEY_RESOLUTION=false to disable these non-sensitive logs
-const LOG_KEY_RESOLUTION = process.env.LOG_KEY_RESOLUTION !== "false";
+// Control logging: set LOG_KEY_RESOLUTION=true to enable non-sensitive key resolution logs
+const LOG_KEY_RESOLUTION = process.env.LOG_KEY_RESOLUTION === "true";
 
 function normalizeKey(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";

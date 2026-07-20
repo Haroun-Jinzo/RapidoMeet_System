@@ -3,8 +3,11 @@
 // C4 Level 3: MCP Dispatcher
 // Routes tools to:
 //   - RapidoCRM MCP (OAuth Bearer per user) for crm_* tools
+//   - RapidoCMS MCP (OAuth Bearer per user) for cms_* tools
+//   - Rapido RH MCP (OAuth Bearer per user) for rh_* tools
 //   - Local Supabase for db_save_task
-//   - n8n MCP hub for everything else (calendar, email, telegram, …)
+//   - Google Calendar API for calendar_create_event
+//   - n8n MCP hub for everything else (email, telegram, …)
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -18,6 +21,10 @@ import { memoryManager } from "./memory";
 import { APIKeys } from "./utils/KeyResolver";
 import { isCrmTool } from "./config/crmTools";
 import { mapCrmMcpArguments, resolveCrmMcpToolName } from "./config/crmMcpToolMap";
+import { isCmsTool } from "./config/cmsTools";
+import { mapCmsMcpArguments, resolveCmsMcpToolName } from "./config/cmsMcpToolMap";
+import { isRhTool } from "./config/rhTools";
+import { mapRhMcpArguments, resolveRhMcpToolName } from "./config/rhMcpToolMap";
 import { progressBus, actionProgressPercent } from "./progress/ProgressBus";
 import { connectionsStore } from "./integrations/ConnectionsStore";
 import { googleCalendarClient, GoogleCalendarEventParams } from "./integrations/GoogleCalendarClient";
@@ -36,17 +43,43 @@ export interface ExecuteAllContext {
   userId: string;
 }
 
+type OAuthMcpProvider = "crm" | "cms" | "rh";
+
 class MCPDispatcher implements IMCPDispatcher {
   private n8nClients: Map<string, Client> = new Map();
-  /** Cache key: `${userId}:${mcpUrl}` */
-  private crmClients: Map<string, Client> = new Map();
+  /** Cache key: `${provider}:${userId}:${mcpUrl}` */
+  private oauthMcpClients: Map<string, Client> = new Map();
 
   invalidateCrmClient(userId: string): void {
-    for (const key of this.crmClients.keys()) {
-      if (key.startsWith(`${userId}:`)) {
-        this.crmClients.delete(key);
+    this.invalidateOAuthMcpClient("crm", userId);
+  }
+
+  invalidateCmsClient(userId: string): void {
+    this.invalidateOAuthMcpClient("cms", userId);
+  }
+
+  invalidateRhClient(userId: string): void {
+    this.invalidateOAuthMcpClient("rh", userId);
+  }
+
+  private invalidateOAuthMcpClient(provider: OAuthMcpProvider, userId: string): void {
+    const prefix = `${provider}:${userId}:`;
+    for (const key of this.oauthMcpClients.keys()) {
+      if (key.startsWith(prefix)) {
+        this.oauthMcpClients.delete(key);
       }
     }
+  }
+
+  private isDirectTool(tool: string): boolean {
+    return (
+      isCrmTool(tool) ||
+      isCmsTool(tool) ||
+      isRhTool(tool) ||
+      tool === "db_save_task" ||
+      tool === "telegram_send_confirmation" ||
+      tool === "calendar_create_event"
+    );
   }
 
   async execute(action: IAction, apiKeys?: APIKeys): Promise<IDispatchResult> {
@@ -56,7 +89,7 @@ class MCPDispatcher implements IMCPDispatcher {
 
     const n8nApiKey = apiKeys?.n8n || process.env.N8N_API_KEY;
 
-    if (!isCrmTool(action.tool) && action.tool !== "db_save_task" && action.tool !== "telegram_send_confirmation" && action.tool !== "calendar_create_event") {
+    if (!this.isDirectTool(action.tool)) {
       if (!this.n8nClients.has(n8nApiKey as string)) {
         await this.initN8nClient(n8nApiKey as string);
       }
@@ -187,6 +220,32 @@ class MCPDispatcher implements IMCPDispatcher {
         if (!connected) {
           console.error(
             `[Dispatcher] RapidoCRM OAuth not connected for ${criticalAction.id} ` +
+              `(user ${userId ?? "unknown"}) — connect in Settings → Integrations`
+          );
+        }
+      }
+
+      if (isCmsTool(criticalAction.tool)) {
+        const connected = userId
+          ? await connectionsStore.hasActiveConnection(userId, "rapidocms")
+          : false;
+
+        if (!connected) {
+          console.error(
+            `[Dispatcher] RapidoCMS OAuth not connected for ${criticalAction.id} ` +
+              `(user ${userId ?? "unknown"}) — connect in Settings → Integrations`
+          );
+        }
+      }
+
+      if (isRhTool(criticalAction.tool)) {
+        const connected = userId
+          ? await connectionsStore.hasActiveConnection(userId, "rapidorh")
+          : false;
+
+        if (!connected) {
+          console.error(
+            `[Dispatcher] Rapido RH OAuth not connected for ${criticalAction.id} ` +
               `(user ${userId ?? "unknown"}) — connect in Settings → Integrations`
           );
         }
@@ -371,11 +430,16 @@ class MCPDispatcher implements IMCPDispatcher {
     }
   }
 
-  private async getCrmClient(userId: string): Promise<Client> {
-    const { accessToken, mcpUrl } = await connectionsStore.getCRMConnection(userId);
-    const cacheKey = `${userId}:${mcpUrl}`;
+  private async getOAuthMcpClient(
+    provider: OAuthMcpProvider,
+    userId: string,
+    label: string,
+    resolveConnection: () => Promise<{ accessToken: string; mcpUrl: string }>
+  ): Promise<Client> {
+    const { accessToken, mcpUrl } = await resolveConnection();
+    const cacheKey = `${provider}:${userId}:${mcpUrl}`;
 
-    const existing = this.crmClients.get(cacheKey);
+    const existing = this.oauthMcpClients.get(cacheKey);
     if (existing) {
       return existing;
     }
@@ -389,15 +453,33 @@ class MCPDispatcher implements IMCPDispatcher {
     });
 
     const client = new Client(
-      { name: "RapidoMeetCRM", version: "1.0.0" },
+      { name: `RapidoMeet${label}`, version: "1.0.0" },
       { capabilities: {} }
     );
 
     await client.connect(transport);
-    this.crmClients.set(cacheKey, client);
-    console.log(`[Dispatcher] Connected to RapidoCRM MCP at ${mcpUrl} for user ${userId}`);
+    this.oauthMcpClients.set(cacheKey, client);
+    console.log(`[Dispatcher] Connected to ${label} MCP at ${mcpUrl} for user ${userId}`);
 
     return client;
+  }
+
+  private async getCrmClient(userId: string): Promise<Client> {
+    return this.getOAuthMcpClient("crm", userId, "RapidoCRM", () =>
+      connectionsStore.getCRMConnection(userId)
+    );
+  }
+
+  private async getCmsClient(userId: string): Promise<Client> {
+    return this.getOAuthMcpClient("cms", userId, "RapidoCMS", () =>
+      connectionsStore.getCMSConnection(userId)
+    );
+  }
+
+  private async getRhClient(userId: string): Promise<Client> {
+    return this.getOAuthMcpClient("rh", userId, "RapidoRH", () =>
+      connectionsStore.getRHConnection(userId)
+    );
   }
 
   private isAuthError(error: unknown): boolean {
@@ -420,13 +502,16 @@ class MCPDispatcher implements IMCPDispatcher {
     );
   }
 
-  /** RapidoCRM tools may return HTTP 200 with JSON { success: false } in content text. */
-  private assertCrmToolSucceeded(result: {
-    content?: unknown;
-    isError?: boolean;
-  }): void {
+  /** OAuth MCP tools may return HTTP 200 with JSON { success: false } in content text. */
+  private assertMcpToolSucceeded(
+    label: string,
+    result: {
+      content?: unknown;
+      isError?: boolean;
+    }
+  ): void {
     if (result.isError) {
-      throw new Error("CRM tool returned isError=true");
+      throw new Error(`${label} tool returned isError=true`);
     }
 
     const items = Array.isArray(result.content) ? result.content : [];
@@ -437,7 +522,7 @@ class MCPDispatcher implements IMCPDispatcher {
         const parsed = JSON.parse(text) as { success?: boolean; message?: string; error?: string };
         if (parsed.success === false) {
           throw new Error(
-            parsed.message || parsed.error || "CRM tool reported success:false"
+            parsed.message || parsed.error || `${label} tool reported success:false`
           );
         }
       } catch (err) {
@@ -568,12 +653,9 @@ class MCPDispatcher implements IMCPDispatcher {
           arguments: toolArgs,
         });
 
-        this.assertCrmToolSucceeded(result as { content?: unknown; isError?: boolean });
+        this.assertMcpToolSucceeded("CRM", result as { content?: unknown; isError?: boolean });
 
-        console.log(
-          `[CRM MCP RESPONSE for ${action.tool} → ${mcpToolName}]:`,
-          JSON.stringify(result, null, 2)
-        );
+        console.log(`[Dispatcher] CRM MCP OK: ${action.tool} → ${mcpToolName}`);
 
         return {
           _mcpStatus: "success",
@@ -586,6 +668,82 @@ class MCPDispatcher implements IMCPDispatcher {
         }
         throw new Error(
           `CRM MCP tool ${action.tool} → ${mcpToolName} execution failed: ${(error as Error).message}`
+        );
+      }
+    }
+
+    if (isCmsTool(action.tool)) {
+      const userId = action.params.userId as string | undefined;
+      if (!userId) {
+        throw new Error("Missing userId on CMS action — cannot resolve OAuth token.");
+      }
+
+      const toolArgs = mapCmsMcpArguments(
+        action.tool,
+        action.params as Record<string, unknown>
+      );
+      const mcpToolName = resolveCmsMcpToolName(action.tool);
+
+      try {
+        const client = await this.getCmsClient(userId);
+        const result = await client.callTool({
+          name: mcpToolName,
+          arguments: toolArgs,
+        });
+
+        this.assertMcpToolSucceeded("CMS", result as { content?: unknown; isError?: boolean });
+
+        console.log(`[Dispatcher] CMS MCP OK: ${action.tool} → ${mcpToolName}`);
+
+        return {
+          _mcpStatus: "success",
+          tool: action.tool,
+          content: result.content,
+        } as Record<string, unknown>;
+      } catch (error) {
+        if (this.isAuthError(error)) {
+          this.invalidateCmsClient(userId);
+        }
+        throw new Error(
+          `CMS MCP tool ${action.tool} → ${mcpToolName} execution failed: ${(error as Error).message}`
+        );
+      }
+    }
+
+    if (isRhTool(action.tool)) {
+      const userId = action.params.userId as string | undefined;
+      if (!userId) {
+        throw new Error("Missing userId on RH action — cannot resolve OAuth token.");
+      }
+
+      const toolArgs = mapRhMcpArguments(
+        action.tool,
+        action.params as Record<string, unknown>
+      );
+      const mcpToolName = resolveRhMcpToolName(action.tool);
+
+      try {
+        const client = await this.getRhClient(userId);
+        const result = await client.callTool({
+          name: mcpToolName,
+          arguments: toolArgs,
+        });
+
+        this.assertMcpToolSucceeded("RH", result as { content?: unknown; isError?: boolean });
+
+        console.log(`[Dispatcher] RH MCP OK: ${action.tool} → ${mcpToolName}`);
+
+        return {
+          _mcpStatus: "success",
+          tool: action.tool,
+          content: result.content,
+        } as Record<string, unknown>;
+      } catch (error) {
+        if (this.isAuthError(error)) {
+          this.invalidateRhClient(userId);
+        }
+        throw new Error(
+          `RH MCP tool ${action.tool} → ${mcpToolName} execution failed: ${(error as Error).message}`
         );
       }
     }

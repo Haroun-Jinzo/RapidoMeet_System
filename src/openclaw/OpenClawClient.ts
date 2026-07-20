@@ -70,7 +70,9 @@ export class OpenClawClient {
           console.log(`[OpenClaw] Received ACK for message: ${msg.message_id}`);
           this.pendingAcks.delete(msg.message_id);
         } else {
-          console.log("[OpenClaw] Received message:", msg);
+          console.log(
+            `[OpenClaw] Received message type: ${typeof msg?.type === "string" ? msg.type : "unknown"}`
+          );
         }
       } catch (err) {
         console.log("[OpenClaw] Received non-JSON message:", data.toString());

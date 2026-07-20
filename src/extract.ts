@@ -137,8 +137,9 @@ class TaskExtractor implements ITaskExtractor {
   ): Promise<INLPOutput> {
     const provider = apiKeys?.Orchestrator?.provider || 'gemini';
     const apiKey = apiKeys?.Orchestrator?.apiKey || process.env.GEMINI_API_KEY;
-    if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) //throw new Error(`${provider} API key not configured`);
-    
+    if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) {
+      throw new Error(`${provider} API key not configured`);
+    }
     console.log(
       `[TaskExtractor] Starting NLP extraction using ${provider.toUpperCase()} — ` +
       `type: ${meetingType}, ` +
@@ -382,7 +383,10 @@ Return ONLY the JSON object. No other text, no markdown formatting.
         .join(", ");
 
       console.error("[TaskExtractor] Zod validation failed:", errors);
-      console.error("[TaskExtractor] Raw parsed object:", JSON.stringify(parsed, null, 2));
+      console.error(
+        "[TaskExtractor] Parsed keys:",
+        parsed && typeof parsed === "object" ? Object.keys(parsed as object).join(", ") : typeof parsed
+      );
 
       throw new Error(`Gemini response validation failed: ${errors}`);
     }

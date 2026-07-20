@@ -1,6 +1,8 @@
 import { ALL_CRM_TOOL_NAMES } from "../config/crmTools";
+import { ALL_CMS_TOOL_NAMES } from "../config/cmsTools";
+import { ALL_RH_TOOL_NAMES } from "../config/rhTools";
 
-/** Non-CRM MCP tools */
+/** Non-CRM/CMS/RH MCP tools */
 export const NON_CRM_MCP_TOOLS = [
   "calendar_create_event",
   "email_send_recap",
@@ -13,14 +15,19 @@ export type NonCrmMcpTool = (typeof NON_CRM_MCP_TOOLS)[number];
 
 /**
  * All possible MCP tool calls the dispatcher can execute.
- * CRM tools: crm_{operation}_{resource} — see config/crmTools.ts
+ * CRM: crm_* — CMS: cms_* — RH: rh_*
  */
 export type MCPTool =
   | (typeof ALL_CRM_TOOL_NAMES)[number]
-  | NonCrmMcpTool;
+  | (typeof ALL_CMS_TOOL_NAMES)[number]
+  | (typeof ALL_RH_TOOL_NAMES)[number]
+  | NonCrmMcpTool
+  | string;
 
 export const ALL_MCP_TOOL_NAMES = [
   ...ALL_CRM_TOOL_NAMES,
+  ...ALL_CMS_TOOL_NAMES,
+  ...ALL_RH_TOOL_NAMES,
   ...NON_CRM_MCP_TOOLS,
 ] as const;
 
