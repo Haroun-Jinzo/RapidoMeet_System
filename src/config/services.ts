@@ -40,7 +40,7 @@ export function requiresConfirmationForTool(tool: string, geminiSays?: boolean):
 /** Groq API configuration for speech-to-text transcription */
 export const GROQ_CONFIG = {
   model: 'whisper-large-v3',
-  maxFileSize: 10 * 1024 * 1024, // 25MB - Groq's limit
+  maxFileSize: 1000 * 1024 * 1024, // 25MB - Groq's limit
 };
 
 /** Local Whisper configuration (faster-whisper) */

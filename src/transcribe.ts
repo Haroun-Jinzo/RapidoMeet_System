@@ -176,14 +176,6 @@ class Transcriber implements ITranscriber {
         return await this.transcribeWithLocalWhisper(tmpPath, language);
       }
 
-      // Validate file size against Groq's hard limit if local whisper didn't catch it
-      if (audioBuffer.length > GROQ_CONFIG.maxFileSize) {
-        throw new Error(
-          `Audio file too large for Groq: ${fileSizeMB}MB. ` +
-          `Maximum is ${Math.round(GROQ_CONFIG.maxFileSize / 1024 / 1024)}MB. Local Whisper fallback is disabled.`
-        );
-      }
-
       // Use Groq API for smaller files
       console.log(`[Transcriber] File size ${fileSizeMB}MB is below threshold, using Groq API`);
       
