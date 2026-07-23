@@ -45,7 +45,7 @@ export const GROQ_CONFIG = {
 
 /** Local Whisper configuration (faster-whisper) */
 export const LOCAL_WHISPER_CONFIG = {
-  enabled: true,
+  enabled: false,
   model: 'base', // large-v3, base, small, tiny (using base for faster CPU inference)
   device: 'auto', // 'auto', 'cpu', 'cuda'
   computeType: 'float32', // 'float32', 'float16', 'int8'
