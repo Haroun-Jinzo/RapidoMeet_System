@@ -23,6 +23,7 @@ import {
 } from "../auth/googleOAuthConfig";
 import { TELEGRAM_PROVIDER } from "../auth/telegramConfig";
 import { decryptCredential, encryptCredential } from "./credentialCrypto";
+import { logTokenRefreshFailure } from "./tokenRefreshLog";
 
 /**
  * Uses existing public.user_connections (same table as API keys in RapidoMeet).
@@ -461,7 +462,7 @@ export class ConnectionsStore {
     const data = (await response.json()) as Record<string, unknown>;
 
     if (!response.ok) {
-      console.error("[ConnectionsStore] CRM token refresh failed:", data);
+      logTokenRefreshFailure("CRM", response, data);
       await this.markConnectionExpired(connectionId);
       throw new Error(
         "RapidoCRM session expired. Please reconnect your account in Settings → Integrations."
@@ -543,7 +544,7 @@ export class ConnectionsStore {
     const data = (await response.json()) as Record<string, unknown>;
 
     if (!response.ok) {
-      console.error("[ConnectionsStore] CMS token refresh failed:", data);
+      logTokenRefreshFailure("CMS", response, data);
       await this.markConnectionExpired(connectionId);
       throw new Error(
         "RapidoCMS session expired. Please reconnect your account in Settings → Integrations."
@@ -625,7 +626,7 @@ export class ConnectionsStore {
     const data = (await response.json()) as Record<string, unknown>;
 
     if (!response.ok) {
-      console.error("[ConnectionsStore] RH token refresh failed:", data);
+      logTokenRefreshFailure("RH", response, data);
       await this.markConnectionExpired(connectionId);
       throw new Error(
         "Rapido RH session expired. Please reconnect your account in Settings → Integrations."
@@ -726,7 +727,7 @@ export class ConnectionsStore {
     const data = (await response.json()) as Record<string, unknown>;
 
     if (!response.ok || response.status === 401 || response.status === 400) {
-      console.error("[ConnectionsStore] Google token refresh failed:", data);
+      logTokenRefreshFailure("Google", response, data);
       await this.markConnectionExpired(connectionId);
       throw new Error(
         "Google Calendar session expired. Please reconnect your account in Settings → Integrations."

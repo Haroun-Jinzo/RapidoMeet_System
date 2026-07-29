@@ -92,7 +92,9 @@ function isUuid(v: string): boolean {
 export class KeyResolver {
   static async resolveKeys(userId: string): Promise<APIKeys> {
     try {
-      console.log(`[KeyResolver] Attempting to fetch keys for user ID: ${userId}`);
+      if (LOG_KEY_RESOLUTION) {
+        console.log(`[KeyResolver] Attempting to fetch keys for user ID: ${userId}`);
+      }
       // Short-circuit for internal or dev identifiers that are not UUIDs
       if (!isUuid(userId)) {
         if (LOG_KEY_RESOLUTION) {

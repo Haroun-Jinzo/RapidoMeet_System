@@ -18,7 +18,7 @@ export function getGoogleOAuthConfig() {
   const scopes =
     process.env.GOOGLE_SCOPES?.trim() ||
     "https://www.googleapis.com/auth/calendar openid email profile";
-  const frontendUrl = process.env.FRONTEND_URL?.trim() || "http://localhost:5173";
+  const frontendUrl = process.env.FRONTEND_URL?.trim() || "http://localhost:8080";
 
   return {
     clientId,

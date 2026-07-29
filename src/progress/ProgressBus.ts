@@ -7,6 +7,7 @@ export type ProgressStep =
   | "action"
   | "confirmation"
   | "complete"
+  | "cancelled"
   | "error";
 
 export interface ProgressEvent {
@@ -40,7 +41,7 @@ export interface ProgressEmitInput {
   pending_actions?: ProgressEvent["pending_actions"];
 }
 
-const TERMINAL_STEPS = new Set<ProgressStep>(["complete", "error"]);
+const TERMINAL_STEPS = new Set<ProgressStep>(["complete", "cancelled", "error"]);
 
 /** Map action index (0-based) into the 70–90 progress band. */
 export function actionProgressPercent(index: number, total: number): number {

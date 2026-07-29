@@ -21,7 +21,8 @@ export interface ISessionContext {
   status:        "processing"   // Pipeline is running
                 | "awaiting_confirmation"  // Gate waiting for user approval
                 | "complete"              // All steps finished successfully
-                | "error";               // Something failed
+                | "error"                 // Something failed
+                | "cancelled";            // User stopped processing
 
   // These are optional because they get filled in as the pipeline progresses.
   // When session is created they are undefined.

@@ -87,9 +87,9 @@ export const SERVER_PORT = parseInt(process.env.PORT || '3000');
 /** Maximum request payload size for file uploads */
 export const MAX_REQUEST_SIZE = '50mb';
 
-/** CORS configuration */
+/** CORS configuration (see config/cors.ts for request-time origin matching) */
 export const CORS_CONFIG = {
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  origin: process.env.CORS_ORIGIN || 'http://localhost:8080,http://localhost:8081',
   credentials: true,
 };
 

@@ -2,13 +2,14 @@ import https from "https";
 import { URL } from "url";
 
 /**
- * POST helper for RapidoCRM token endpoint.
+ * POST helper for OAuth token endpoints.
  * Uses Node https directly — more reliable than fetch on some Windows networks.
  */
 export async function postOAuthForm(
   tokenUrl: string,
   headers: Record<string, string>,
-  body: string
+  body: string,
+  timeoutLabel = "OAuth token request"
 ): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
   const parsed = new URL(tokenUrl);
 
@@ -42,7 +43,7 @@ export async function postOAuthForm(
 
     req.on("timeout", () => {
       req.destroy();
-      reject(new Error("RapidoCRM token request timed out"));
+      reject(new Error(`${timeoutLabel} timed out`));
     });
     req.on("error", reject);
     req.write(body);

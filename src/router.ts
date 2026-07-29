@@ -9,9 +9,6 @@
  * Dependencies: Google Gemini 2.0 Flash API, centralized service configuration
  */
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { OpenAI } from "openai";
-import Anthropic from "@anthropic-ai/sdk";
 import { z }                  from "zod";
 import { nanoid }             from "nanoid";
 import {
@@ -24,9 +21,9 @@ import {
 import { CircuitBreaker } from "./resilience/CircuitBreaker";
 import {
   requiresConfirmationForTool,
-  GEMINI_CONFIG,
   CIRCUIT_BREAKER_CONFIG,
 } from "./config/services";
+import { generateLlmText } from "./utils/llmGenerate";
 import { buildCrmToolsPromptTable, crmToolSortIndex } from "./config/crmTools";
 import { buildCmsToolsPromptTable } from "./config/cmsTools";
 import { buildRhToolsPromptTable } from "./config/rhTools";
@@ -118,46 +115,15 @@ class IntentRouter implements IIntentRouter {
     try {
       let rawText = "";
 
-      const executeGenAI = async () => {
-        if (provider === "openai") {
-          const openai = new OpenAI({ apiKey });
-          const response = await openai.chat.completions.create({
-            model: "gpt-4o",
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: userPrompt }
-            ],
-            response_format: { type: "json_object" },
-            temperature: 0.0,
-            max_tokens: 2048,
-          });
-          return response.choices[0].message.content || "{}";
-        } else if (provider === "anthropic" || provider === "claude") {
-          const anthropic = new Anthropic({ apiKey });
-          const response = await anthropic.messages.create({
-            model: "claude-3-5-sonnet-20241022",
-            system: systemPrompt,
-            messages: [{ role: "user", content: userPrompt }],
-            temperature: 0.0,
-            max_tokens: 2048,
-          });
-          return (response.content[0] as any).text || "{}";
-        } else {
-          // Default: Gemini
-          const genAI = new GoogleGenerativeAI(apiKey);
-          const model = genAI.getGenerativeModel({
-            model: GEMINI_CONFIG.model,
-            systemInstruction: systemPrompt,
-            generationConfig: {
-              responseMimeType: "application/json",
-              temperature: 0.0, 
-              maxOutputTokens: 2048,
-            },
-          });
-          const result = await model.generateContent(userPrompt);
-          return result.response.text();
-        }
-      };
+      const executeGenAI = async () =>
+        generateLlmText({
+          provider,
+          apiKey,
+          systemPrompt,
+          userPrompt,
+          temperature: 0.0,
+          maxTokens: 2048,
+        });
 
       rawText = await Promise.race([
         this.circuitBreaker.execute(executeGenAI),

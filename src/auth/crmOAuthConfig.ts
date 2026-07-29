@@ -31,7 +31,7 @@ export function getCrmOAuthConfig() {
   const redirectUri =
     process.env.RAPIDOCRM_REDIRECT_URI?.trim() || "http://localhost:3000/auth/crm/callback";
   const scope = process.env.RAPIDOCRM_SCOPE?.trim() || "mcp:use";
-  const frontendUrl = process.env.FRONTEND_URL?.trim() || "http://localhost:5173";
+  const frontendUrl = process.env.FRONTEND_URL?.trim() || "http://localhost:8080";
 
   return {
     clientId,

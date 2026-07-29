@@ -8,6 +8,7 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import * as dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
+import { buildCorsOptions } from "./config/cors";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -20,40 +21,27 @@ import { intentRouter } from "./router";
 import { mcpDispatcher } from "./dispatcher";
 import { sessionManager } from "./session";
 import { skillRegistry } from "./skill-loader";
-import { memoryManager } from "./memory";
 import { requireAuth } from "./middleware/auth";
 import { internalRouter } from "./internal/tokenBroker";
 import { openclawClient } from "./openclaw/OpenClawClient";
 import multer from "multer";
 import { progressBus } from "./progress/ProgressBus";
-import { streamSessionProgress } from "./progress/sse";
 import { crmOAuthRouter } from "./auth/crmOAuthRouter";
 import { cmsOAuthRouter } from "./auth/cmsOAuthRouter";
 import { rhOAuthRouter } from "./auth/rhOAuthRouter";
 import { googleOAuthRouter } from "./auth/googleOAuthRouter";
 import { telegramRouter } from "./auth/telegramRouter";
-import { isCrmTool } from "./config/crmTools";
-import { isCmsTool } from "./config/cmsTools";
-import { isRhTool } from "./config/rhTools";
 import { mergeActionStatuses } from "./utils/mergeActionStatuses";
-import { formatPendingAction, formatConfirmationAction } from "./utils/pendingActionFormatter";
-import { IAction, ISessionContext } from "./interfaces";
-import { persistMeetingResults } from "./integrations/persistMeetingResults";
-
-function getPendingCriticalActions(actions: IAction[] | undefined): IAction[] {
-  return actions?.filter((a) => a.requiresConfirmation && a.status === "pending") ?? [];
-}
-
-async function syncMeetingToSupabase(
-  session: ISessionContext,
-  meetingStatus: "analyzing" | "completed"
-): Promise<void> {
-  try {
-    await persistMeetingResults(session, { meetingStatus });
-  } catch (err) {
-    console.warn("[Pipeline] persistMeetingResults failed:", (err as Error).message);
-  }
-}
+import { formatPendingAction } from "./utils/pendingActionFormatter";
+import {
+  createSessionsRouter,
+  syncMeetingToSupabase,
+} from "./routes/sessions";
+import {
+  clearPipelineCancellation,
+  PipelineCancelledError,
+  throwIfPipelineCancelled,
+} from "./pipeline/cancellation";
 
 type AudioUploadRequest = Omit<Request, "file"> & {
   file?: {
@@ -132,7 +120,12 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
-app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
+app.use(cors(buildCorsOptions()));
+
+// Ops / smoke checks
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, service: "openclaw-server", ts: new Date().toISOString() });
+});
 
 // Internal routes (OpenClaw -> RapidoMeet via shared secret)
 app.use('/internal', internalRouter);
@@ -143,6 +136,8 @@ app.use('/auth/cms', cmsOAuthRouter);
 app.use('/auth/rh', rhOAuthRouter);
 app.use('/auth/google', googleOAuthRouter);
 app.use('/auth/telegram', telegramRouter);
+
+app.use(createSessionsRouter(authMiddleware));
 
 // Custom file handling - expects audio data in req.body
 const handleAudioUpload: express.RequestHandler = (req, res, next) => {
@@ -232,8 +227,10 @@ app.post(
     // This ensures the bot runner won't timeout waiting for heavy operations
     (async () => {
       try {
+        throwIfPipelineCancelled(session.id);
         // Resolve dynamic API keys based on the user's Supabase vaulted preferences
         const apiKeys = await KeyResolver.resolveKeys(user.id);
+        throwIfPipelineCancelled(session.id);
         console.log(
           "[Pipeline] Key sources:",
           `orchestrator=${apiKeys.Orchestrator.provider}(len=${apiKeys.Orchestrator.apiKey.length})`,
@@ -263,6 +260,7 @@ app.post(
           language,
           apiKeys
         );
+        throwIfPipelineCancelled(session.id);
         session.transcript = transcription.transcript;
         session.transcriptionSegments = transcription.segments;
         session.durationSeconds = Math.round(transcription.duration ?? 0);
@@ -294,6 +292,7 @@ app.post(
           skill.content,
           apiKeys
         );
+        throwIfPipelineCancelled(session.id);
         session.extraction = extraction;
         await sessionManager.save(session);
         progressBus.emit({
@@ -313,6 +312,7 @@ app.post(
           user_instructions,
           apiKeys
         );
+        throwIfPipelineCancelled(session.id);
         progressBus.emit({
           sessionId: session.id,
           step: "routing",
@@ -329,10 +329,12 @@ app.post(
         await sessionManager.save(session);
 
         // ── Step 5: Execute non-critical actions immediately ───────────────
+        throwIfPipelineCancelled(session.id);
         console.log(`[Pipeline] ${session.id} — Step 5: Executing Actions via N8N...`);
         await mcpDispatcher.executeAll(actions, session.id, apiKeys, {
           userId: user.id,
         });
+        throwIfPipelineCancelled(session.id);
 
         // Persist dispatch state so approvals during slow I/O see up-to-date actions
         session.actions = actions;
@@ -342,6 +344,7 @@ app.post(
         await syncMeetingToSupabase(session, "analyzing");
 
         // Upload audio
+        throwIfPipelineCancelled(session.id);
         let audioStoragePath: string | null = null;
         try {
           audioStoragePath = await uploadAudioToSupabase(
@@ -352,6 +355,7 @@ app.post(
         } catch (storageErr) {
           console.warn("[Pipeline] Supabase storage failed (non-fatal):", (storageErr as Error).message);
         }
+        throwIfPipelineCancelled(session.id);
 
         // ── Step 6: Check for critical actions delaying completion ─────────
         // Reconcile with Redis — user may have approved while step 5 I/O was running
@@ -429,6 +433,13 @@ app.post(
         }
 
       } catch (error) {
+        if (error instanceof PipelineCancelledError) {
+          session.status = "cancelled";
+          await sessionManager.save(session);
+          console.log(`[Pipeline] ${session.id} — Cancelled by user`);
+          return;
+        }
+
         session.status = "error";
         await sessionManager.save(session);
         
@@ -453,227 +464,15 @@ app.post(
         
         console.error("[Pipeline] Failed:", errorMessage);
         console.error("[Pipeline] Stack:", error instanceof Error ? error.stack : "N/A");
+      } finally {
+        clearPipelineCancellation(session.id);
       }
     })(); // Fire-and-forget async IIFE
   }
 );
 
-// ──────────────────────────────────────────────────────────────────────
-// GET /sessions/:id/progress
-// Server-Sent Events stream of live pipeline progress for a session.
-// ──────────────────────────────────────────────────────────────────────
-app.get("/sessions/:id/progress", authMiddleware, async (req: Request, res: Response) => {
-  const sessionId = req.params.id as string;
-  const user = (req as any).user;
-  const session = await sessionManager.load(sessionId);
 
-  if (!session) {
-    return res.status(404).json({ error: "Session not found or expired" });
-  }
-
-  if (session.userId !== user.id) {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-
-  streamSessionProgress(req, res, sessionId);
-});
-
-// ──────────────────────────────────────────────────────────────────────
-// POST /sessions/:id/actions/:actionId/confirm
-// Approves a critical action and notifies OpenClaw to continue.
-// ──────────────────────────────────────────────────────────────────────
-app.post('/sessions/:id/actions/:actionId/confirm', authMiddleware, async (req: Request, res: Response) => {
-  await handleActionDecision(req, res, 'confirm');
-});
-
-// ──────────────────────────────────────────────────────────────────────
-// POST /sessions/:id/actions/:actionId/refuse
-// Refuses a critical action and notifies OpenClaw.
-// ──────────────────────────────────────────────────────────────────────
-app.post('/sessions/:id/actions/:actionId/refuse', authMiddleware, async (req: Request, res: Response) => {
-  await handleActionDecision(req, res, 'refuse');
-});
-
-async function handleActionDecision(req: Request, res: Response, decision: 'confirm' | 'refuse') {
-  const session_id = req.params.id as string;
-  const action_id = req.params.actionId as string;
-  const session = await sessionManager.load(session_id);
-
-  if (!session) return res.status(404).json({ error: 'Session not found or expired' });
-
-  const action = session.actions?.find((a: any) => a.id === action_id);
-  if (!action) return res.status(404).json({ error: 'Action not found' });
-
-  const countStillPending = () => getPendingCriticalActions(session.actions);
-
-  // Idempotent confirm — avoid duplicate CRM writes if user approves twice
-  if (
-    decision === "confirm" &&
-    (action.status === "executed" ||
-      (action.status === "confirmed" && action.execution_status === "success"))
-  ) {
-    console.log(`[Gate] Action ${action_id} already executed — skipping duplicate confirm`);
-    const stillPending = countStillPending();
-    if (stillPending.length === 0) {
-      session.status = "complete";
-    }
-    await sessionManager.save(session);
-    return res.json({
-      action_id,
-      decision: action.status,
-      already_done: true,
-      still_pending: stillPending.length,
-    });
-  }
-
-  if (decision === "confirm" && action.status === "refused") {
-    return res.status(409).json({ error: "Action was already refused" });
-  }
-
-  action.status = decision === 'confirm' ? 'confirmed' : 'refused';
-  console.log(`[Gate] Action ${action_id} ${action.status.toUpperCase()}`);
-
-  try {
-    await memoryManager.updatePendingActionStatus(
-      action_id,
-      decision === 'confirm' ? 'approved' : 'refused'
-    );
-  } catch (err) {
-    console.warn(`[Gate] pending_actions update failed for ${action_id}:`, (err as Error).message);
-  }
-
-  // CRM / CMS / RH / Google Calendar: execute directly after approval — no n8n hop.
-  const runsOnConfirm =
-    decision === "confirm" &&
-    (isCrmTool(action.tool) ||
-      isCmsTool(action.tool) ||
-      isRhTool(action.tool) ||
-      action.tool === "calendar_create_event");
-
-  if (runsOnConfirm) {
-    try {
-      const apiKeys = await KeyResolver.resolveKeys(session.userId);
-      const execResult = await mcpDispatcher.execute(action, apiKeys);
-      if (execResult.success) {
-        action.status = "executed";
-        action.execution_status = "success";
-        action.updated_at = new Date().toISOString();
-        const channel =
-          action.tool === "calendar_create_event"
-            ? "Google Calendar API"
-            : isCmsTool(action.tool)
-              ? "RapidoCMS MCP"
-              : isRhTool(action.tool)
-                ? "Rapido RH MCP"
-                : "RapidoCRM MCP";
-        console.log(`[Gate] Action ${action_id} executed via ${channel}`);
-        progressBus.emit({
-          sessionId: session_id,
-          step: 'action',
-          message: `Completed: ${action.tool.replace(/_/g, ' ')}`,
-          progress: 98,
-          detail: `Executed after approval via ${channel}`,
-        });
-      } else {
-        action.execution_status = "failed";
-        action.status = "pending";
-        console.error(`[Gate] Action ${action_id} failed:`, execResult.error);
-        progressBus.emit({
-          sessionId: session_id,
-          step: 'error',
-          message: `Failed: ${action.tool.replace(/_/g, ' ')}`,
-          progress: 98,
-          error: execResult.error,
-        });
-      }
-    } catch (err) {
-      action.execution_status = "failed";
-      action.status = "pending";
-      console.error(`[Gate] Execution error for ${action_id}:`, (err as Error).message);
-    }
-  }
-
-  const stillPending = countStillPending();
-
-  if (stillPending.length === 0) {
-    session.status = 'complete';
-    await syncMeetingToSupabase(session, "completed");
-    progressBus.emit({
-      sessionId: session_id,
-      step: 'complete',
-      state: 'complete',
-      message: 'All actions approved — meeting processing complete',
-      progress: 100,
-    });
-  } else {
-    session.status = "awaiting_confirmation";
-    progressBus.emit({
-      sessionId: session_id,
-      step: "confirmation",
-      state: "awaiting_confirmation",
-      message: `${stillPending.length} action${stillPending.length === 1 ? "" : "s"} still waiting for your approval`,
-      progress: 95,
-      detail: stillPending.map((a) => a.tool).join(", "),
-      pending_actions: stillPending.map(formatPendingAction),
-    });
-  }
-
-  await sessionManager.save(session);
-
-  // Notify OpenClaw
-  const wsType = decision === 'confirm' ? 'meeting.action_confirmed' : 'meeting.action_refused';
-  try {
-    await openclawClient.sendReport(wsType as any, {
-      session_id,
-      user_id: session.userId,
-      action_id,
-      decision,
-      still_pending: stillPending.length
-    });
-  } catch (e) {
-    console.error("OpenClaw WS emit failed:", e);
-  }
-
-  return res.json({
-    action_id,
-    decision: action.status,
-    still_pending: stillPending.length,
-    pending_actions: stillPending.map(formatPendingAction),
-    confirmation_actions: (session.actions ?? [])
-      .filter((a) => a.requiresConfirmation)
-      .map(formatConfirmationAction),
-    session_status: session.status,
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /session/:id
-// Returns the current state of a session.
-// The frontend polls this every 2 seconds to show live pipeline status.
-// ─────────────────────────────────────────────────────────────────────────────
-
-app.get("/session/:id", authMiddleware, async (req: Request, res: Response) => {
-  const sessionId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-  const session = await sessionManager.load(sessionId);
-
-  if (!session) {
-    return res.status(404).json({
-      error: `Session ${sessionId} not found or expired`
-    });
-  }
-
-  const pendingCritical = getPendingCriticalActions(session.actions);
-  const confirmationActions = (session.actions ?? [])
-    .filter((a) => a.requiresConfirmation)
-    .map(formatConfirmationAction);
-
-  return res.json({
-    ...session,
-    meeting_id: session.meetingId ?? null,
-    pending_actions: pendingCritical.map(formatPendingAction),
-    confirmation_actions: confirmationActions,
-  });
-});
+// Session progress/confirm/refuse routes: createSessionsRouter (mounted above)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Server startup

@@ -14,6 +14,16 @@ const supabaseService = createClient(
 
 export type PersistMeetingStatus = "analyzing" | "completed";
 
+export async function persistMeetingCancellation(session: ISessionContext): Promise<void> {
+  const meetingId = await resolveMeetingId(session);
+  if (!meetingId) return;
+
+  await safeMeetingPatch(supabaseService, meetingId, session.userId, {
+    error_message: "Traitement annulé par l'utilisateur",
+    updated_at: new Date().toISOString(),
+  });
+}
+
 function sentimentToScore(sentiment?: string): number {
   switch (sentiment) {
     case "positive":
