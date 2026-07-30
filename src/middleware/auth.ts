@@ -213,15 +213,20 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
       return res.status(401).json({ error: "Missing or invalid authorization" });
     }
 
-    const fromSupabase = await verifySupabaseAccessToken(token);
-    if (fromSupabase) {
-      attachUser(req, fromSupabase.userId, fromSupabase.extra);
-      return next();
-    }
-
+    // Supabase's current ES256 access tokens can be verified locally against
+    // public JWKS. Do this first so authentication does not depend on an admin
+    // API round trip or fail because that service is temporarily slow.
     const fromJwks = await verifyWithSupabaseJwks(token);
     if (fromJwks) {
       attachUser(req, fromJwks.userId);
+      return next();
+    }
+
+    // Compatibility fallback for legacy HS256 tokens and projects that have
+    // not migrated to asymmetric signing keys.
+    const fromSupabase = await verifySupabaseAccessToken(token);
+    if (fromSupabase) {
+      attachUser(req, fromSupabase.userId, fromSupabase.extra);
       return next();
     }
 

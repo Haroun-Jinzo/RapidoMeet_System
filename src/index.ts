@@ -123,9 +123,16 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use(cors(buildCorsOptions()));
 
-// Ops / smoke checks
+// Ops / smoke checks. `build` identifies the running code so a stale deployment
+// can be spotted without shell access to the server.
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "openclaw-server", ts: new Date().toISOString() });
+  res.json({
+    ok: true,
+    service: "openclaw-server",
+    build: process.env.BUILD_COMMIT || "unknown",
+    features: ["async-upload-202", "session-cancel", "jwks-auth"],
+    ts: new Date().toISOString(),
+  });
 });
 
 // Internal routes (OpenClaw -> RapidoMeet via shared secret)
