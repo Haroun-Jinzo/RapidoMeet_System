@@ -21,7 +21,7 @@ import { intentRouter } from "./router";
 import { mcpDispatcher } from "./dispatcher";
 import { sessionManager } from "./session";
 import { skillRegistry } from "./skill-loader";
-import { requireAuth } from "./middleware/auth";
+import { assertAuthConfiguration, requireAuth } from "./middleware/auth";
 import { internalRouter } from "./internal/tokenBroker";
 import { openclawClient } from "./openclaw/OpenClawClient";
 import multer from "multer";
@@ -116,6 +116,7 @@ const authMiddleware = requireAuth;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+assertAuthConfiguration();
 
 // Middleware
 app.use(express.json({ limit: "50mb" }));

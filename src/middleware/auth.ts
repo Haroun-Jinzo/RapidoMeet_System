@@ -1,11 +1,52 @@
 import { Request, Response, NextFunction } from "express";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import jwt from "jsonwebtoken";
+import { createPublicKey } from "crypto";
 import * as dotenv from "dotenv";
 
 dotenv.config();
 
 let supabaseAuthAdmin: SupabaseClient | null = null;
+const PRODUCTION_PROJECT_REF = "jrpjwggcabbxoqvaxuay";
+type SupabaseJwk = Record<string, unknown> & { kid?: string };
+const jwksCache = new Map<string, { keys: SupabaseJwk[]; expiresAt: number }>();
+
+function getExpectedProjectRef(): string {
+  return process.env.SUPABASE_PROJECT_REF?.trim() || PRODUCTION_PROJECT_REF;
+}
+
+function getExpectedIssuer(): string {
+  return process.env.JWT_ISSUER?.trim()
+    || `https://${getExpectedProjectRef()}.supabase.co/auth/v1`;
+}
+
+function decodeServiceKeyRef(key: string): string | null {
+  try {
+    const payload = JSON.parse(Buffer.from(key.split(".")[1] || "", "base64url").toString());
+    return typeof payload.ref === "string" ? payload.ref : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Fail startup before requests can be authenticated against the wrong project. */
+export function assertAuthConfiguration(): void {
+  const expectedRef = getExpectedProjectRef();
+  const url = process.env.SUPABASE_URL?.trim();
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+
+  if (!url || !serviceKey) {
+    throw new Error("[Auth] SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required");
+  }
+
+  const urlRef = new URL(url).hostname.split(".")[0];
+  const keyRef = decodeServiceKeyRef(serviceKey);
+  if (urlRef !== expectedRef || (keyRef && keyRef !== expectedRef)) {
+    throw new Error(
+      `[Auth] Supabase project mismatch: expected ${expectedRef}, URL=${urlRef}, service-key=${keyRef || "unknown"}`,
+    );
+  }
+}
 
 function getSupabaseAuthAdmin(): SupabaseClient | null {
   const url = process.env.SUPABASE_URL?.trim();
@@ -80,6 +121,61 @@ async function verifySupabaseAccessToken(
   };
 }
 
+async function getJwks(issuer: string, forceRefresh = false): Promise<SupabaseJwk[]> {
+  const cached = jwksCache.get(issuer);
+  if (!forceRefresh && cached && cached.expiresAt > Date.now()) return cached.keys;
+
+  const response = await fetch(`${issuer}/.well-known/jwks.json`, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`JWKS endpoint returned ${response.status}`);
+
+  const body = await response.json() as { keys?: SupabaseJwk[] };
+  const keys = Array.isArray(body.keys) ? body.keys : [];
+  jwksCache.set(issuer, { keys, expiresAt: Date.now() + 10 * 60_000 });
+  return keys;
+}
+
+/**
+ * Verify Supabase's current asymmetric access tokens without relying on an
+ * admin API request. The issuer is pinned to this application's project.
+ */
+async function verifyWithSupabaseJwks(token: string): Promise<{ userId: string } | null> {
+  try {
+    const decoded = jwt.decode(token, { complete: true });
+    if (!decoded || typeof decoded === "string") return null;
+    if (decoded.header.alg !== "ES256" || !decoded.header.kid) return null;
+
+    const issuer = getExpectedIssuer();
+    const claims = decoded.payload;
+    if (typeof claims === "string") return null;
+    if (claims.iss !== issuer || typeof claims.sub !== "string") return null;
+
+    let keys = await getJwks(issuer);
+    let jwk = keys.find(key => key.kid === decoded.header.kid);
+    if (!jwk) {
+      keys = await getJwks(issuer, true);
+      jwk = keys.find(key => key.kid === decoded.header.kid);
+    }
+    if (!jwk) return null;
+
+    const publicKey = createPublicKey(
+      { key: jwk, format: "jwk" } as Parameters<typeof createPublicKey>[0],
+    );
+    const verified = jwt.verify(token, publicKey, {
+      algorithms: ["ES256"],
+      audience: process.env.JWT_AUDIENCE || "authenticated",
+      issuer,
+    }) as jwt.JwtPayload;
+
+    return typeof verified.sub === "string" ? { userId: verified.sub } : null;
+  } catch (err) {
+    console.warn("[Auth] Supabase JWKS verify failed:", (err as Error).message);
+    return null;
+  }
+}
+
 function verifyWithJwtSecret(token: string): { userId: string } | null {
   const secret = process.env.SUPABASE_JWT_SECRET?.trim();
   if (!secret) return null;
@@ -120,6 +216,12 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
     const fromSupabase = await verifySupabaseAccessToken(token);
     if (fromSupabase) {
       attachUser(req, fromSupabase.userId, fromSupabase.extra);
+      return next();
+    }
+
+    const fromJwks = await verifyWithSupabaseJwks(token);
+    if (fromJwks) {
+      attachUser(req, fromJwks.userId);
       return next();
     }
 
