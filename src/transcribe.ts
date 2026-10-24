@@ -1,14 +1,5 @@
 import FormData from 'form-data';
 import fetch from 'node-fetch';
-// src/transcribe.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// C4 Level 3: Transcription
-// Interface:  ITranscriber (from interfaces.ts)
-// Responsibility: Convert audio to structured text with speaker diarisation.
-//                 The ONLY module that calls the transcription API.
-// Dependencies: Groq API (GROQ_API_KEY) — Whisper large-v3.
-// Note: Swapped from Deepgram to Groq Whisper — interface unchanged.
-// ─────────────────────────────────────────────────────────────────────────────
 
 import Groq from "groq-sdk";
 import * as fs from "fs";
@@ -27,27 +18,11 @@ import { splitAudioIfNeeded } from './utils/splitAudio';
 
 const execAsync = promisify(exec);
 
-/**
- * Speech-to-Text Transcription Service
- * 
- * This service converts audio files/streams to structured text transcripts
- * using Groq's Whisper large-v3 model. It provides:
- * - File and stream-based transcription
- * - Automatic speaker segmentation (labels all segments as "Speaker 0")
- * - Error handling and circuit breaker protection against Groq API failures
- * - Temporary file management for SDK compatibility
- * 
- * Note: Whisper doesn't perform true speaker diarization. For production
- * speaker identification, consider: pyannote.audio or AssemblyAI.
- */
 class Transcriber implements ITranscriber {
 
   private circuitBreaker: CircuitBreaker;
 
   constructor() {
-    // Initialize circuit breaker to protect against cascading failures
-    // If API becomes unresponsive, circuit breaker will fail fast
-    // instead of causing request timeouts and retry storms
     this.circuitBreaker = new CircuitBreaker('transcriber', CIRCUIT_BREAKER_CONFIG);
     
     console.log("[Transcriber] Client initialised with circuit breaker protection");
@@ -112,16 +87,6 @@ class Transcriber implements ITranscriber {
   }
 
   /**
-   * Transcribe a complete audio file and return structured result with segments
-   * 
-   * Flow:
-   * 1. Auto-detect: use local whisper for large files (> 10MB)
-   * 2. Otherwise use Groq API for smaller files
-   * 3. Write buffer to temp file
-   * 4. Call API with circuit breaker protection
-   * 5. Parse response and build segment list
-   * 6. Clean up temp file
-   * 
    * @param audioBuffer - Binary audio data
    * @param mimeType - Audio format (audio/wav, audio/mp3, etc.)
    * @param language - ISO language code (default: French)
@@ -254,13 +219,11 @@ class Transcriber implements ITranscriber {
         transcript: fullTranscript.trim(),
         segments: allSegments,
         duration: totalDuration,
-        confidence: 0.95,  // Whisper doesn't return confidence scores — use fixed value
+        confidence: 0.95,
         language,
       };
 
     } finally {
-      // Cleanup: Always delete temp file, even if transcription failed
-      // "finally" block runs regardless of success/error
       if (fs.existsSync(tmpPath)) {
         fs.unlinkSync(tmpPath);
       }
@@ -269,18 +232,6 @@ class Transcriber implements ITranscriber {
 
   /**
    * Transcribe audio from a readable stream
-   * 
-   * Since Groq doesn't support real-time streaming, we:
-   * 1. Collect ALL audio chunks from the stream into memory
-   * 2. When stream ends, call transcribeFile() with complete buffer
-   * 3. Call onPartial() periodically to show progress to the UI
-   * 
-   * ⚠️ This means transcription only occurs AFTER the meeting ends.
-   * For production real-time transcription, consider:
-   *   - AssemblyAI (supports WebSocket streaming)
-   *   - Deepgram (supports WebSocket + gRPC streaming)
-   *   - A separate Python service using faster-whisper
-   * 
    * @param stream - Node.js readable stream emitting audio chunks
    * @param onPartial - Callback for progress messages shown to UI
    * @returns Promise resolving to transcription result
@@ -303,8 +254,6 @@ class Transcriber implements ITranscriber {
         chunks.push(chunk);
         totalBytes += chunk.length;
 
-        // Send progress update every 5MB so UI shows the application is responsive
-        // Without progress feedback, UI appears frozen during long recordings
         if (totalBytes % (5 * 1024 * 1024) < chunk.length) {
           const mb = Math.round(totalBytes / 1024 / 1024);
           onPartial(`Enregistrement en cours... ${mb}MB capturés`);
@@ -320,10 +269,7 @@ class Transcriber implements ITranscriber {
         onPartial("Transcription en cours...");
 
         try {
-          // Concatenate all chunks into one buffer and transcribe
           const fullBuffer = Buffer.concat(chunks);
-          // Assume WAV format from Playwright bot recording
-          // ⚠️ TODO: Detect format from stream metadata instead of assuming
           const result = await this.transcribeFile(fullBuffer, "audio/wav", "fr", apiKeys);
           resolve(result);
         } catch (error) {
@@ -340,14 +286,6 @@ class Transcriber implements ITranscriber {
   }
 
   /**
-   * Convert Groq Whisper segments to internal domain model
-   * 
-   * Whisper's segments represent speech pauses and are approximately
-   * at sentence/breath boundaries. We map them to our ISpeakerSegment model.
-   * 
-   * ⚠️ ALL segments are labeled "Speaker 0" because Whisper doesn't identify speakers.
-   * Each speaker would need pyannote.audio or AssemblyAI speaker detection.
-   * 
    * @param whisperSegments - Raw Whisper API response segments
    * @returns Segments in our internal ISpeakerSegment format
    */
@@ -355,25 +293,18 @@ class Transcriber implements ITranscriber {
     whisperSegments: Array<{ text: string; start: number; end: number }>
   ): ISpeakerSegment[] {
     return whisperSegments.map(seg => ({
-      speaker: "Speaker 0",       // Whisper doesn't identify speakers
-      text:    seg.text.trim(),   // Remove whitespace from segment text
-      start:   seg.start,         // Start time in seconds
-      end:     seg.end,           // End time in seconds
+      speaker: "Speaker 0",       
+      text:    seg.text.trim(),
+      start:   seg.start,
+      end:     seg.end,
     }));
   }
 
   /**
-   * Map MIME type strings to file extensions
-   * 
-   * Groq SDK uses file extensions to detect audio format during upload.
-   * This mapping ensures we write temp files with the correct extension.
-   * 
    * @param mimeType - MIME type string (e.g. "audio/wav")
    * @returns File extension with dot prefix (e.g. ".wav")
    */
   private getExtension(mimeType: string): string {
-    // Mapping of MIME types to file extensions
-    // Falls back to .mp3 if type is unknown
     const map: Record<string, string> = {
       "audio/mpeg":  ".mp3",
       "audio/mp3":   ".mp3",
@@ -388,19 +319,5 @@ class Transcriber implements ITranscriber {
     return map[mimeType] || ".mp3";
   }
 }
-
-// ============================================================================
-// Singleton Export
-// ============================================================================
-
-/**
- * Global transcriber instance
- * 
- * Exported as a singleton so all modules use the same Groq client.
- * This reuses the same API connection, reducing overhead.
- * 
- * Usage in other modules:
- *   import { transcriber } from './transcribe';
- *   await transcriber.transcribeFile(buffer, 'audio/wav');
- */
+/* this is the singleton export*/
 export const transcriber = new Transcriber();

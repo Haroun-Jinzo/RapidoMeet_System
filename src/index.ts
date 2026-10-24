@@ -1,9 +1,3 @@
-// src/index.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// C4 Level 1: Server Entry Point
-// Responsibility: Start Express server, set up routes, manage request pipeline.
-// ─────────────────────────────────────────────────────────────────────────────
-
 import express, { Request, Response } from "express";
 import cors from "cors";
 import * as dotenv from "dotenv";

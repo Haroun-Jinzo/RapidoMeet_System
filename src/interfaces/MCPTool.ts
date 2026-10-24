@@ -30,11 +30,3 @@ export const ALL_MCP_TOOL_NAMES = [
   ...ALL_RH_TOOL_NAMES,
   ...NON_CRM_MCP_TOOLS,
 ] as const;
-
-/**
- * One atomic action the dispatcher will execute.
- *
- * The requiresConfirmation flag is the Confirmation Gate trigger.
- * When true: pipeline pauses, user is notified, must approve before dispatch.
- * When false: dispatcher executes immediately, no human needed.
- */

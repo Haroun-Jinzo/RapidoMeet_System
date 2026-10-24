@@ -1,26 +1,13 @@
-// src/skill-loader.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// C4 Level 3: Skill Loader
-// Interface:  ISkillRegistry (from interfaces.ts)
-// Responsibility: Load .md Skill files from disk, detect skills from
-//                 transcripts, hot-reload on file changes.
-// Dependencies: filesystem only — no network, no database, no AI calls.
-// ─────────────────────────────────────────────────────────────────────────────
-
 import * as fs   from "fs";
 import * as path from "path";
-import matter    from "gray-matter";  // parses YAML frontmatter from .md files
+import matter    from "gray-matter";  
 
 import { ISkill, ISkillRegistry, MeetingType } from "./interfaces";
 
 class SkillLoader implements ISkillRegistry {
 
-  // In-memory store: skill name → skill object
-  // We use a Map so lookups are O(1)
   private skills: Map<string, ISkill> = new Map();
 
-  // The directory where .md files are stored
-  // Can be overridden via environment variable
   private skillsDir: string;
 
   constructor() {
@@ -29,13 +16,8 @@ class SkillLoader implements ISkillRegistry {
       : path.resolve(__dirname, "../skills");
   }
 
-  // ── loadAll ────────────────────────────────────────────────────────────────
-  // Called once at server startup.
-  // Reads every .md file in the skills directory and loads it into memory.
-
   async loadAll(): Promise<void> {
     // Create the skills directory if it does not exist
-    // This prevents crashes if the folder was accidentally deleted
     if (!fs.existsSync(this.skillsDir)) {
       fs.mkdirSync(this.skillsDir, { recursive: true });
       console.log(`[SkillLoader] Created skills directory: ${this.skillsDir}`);
@@ -43,11 +25,11 @@ class SkillLoader implements ISkillRegistry {
 
     // Read all files in the directory
     const files = fs.readdirSync(this.skillsDir)
-      .filter(f => f.endsWith(".md"));  // Only process Markdown files
+      .filter(f => f.endsWith(".md"));  
 
     if (files.length === 0) {
       console.warn(`[SkillLoader] Warning: no .md files found in ${this.skillsDir}`);
-      this.createDefaultSkills();  // Create default skills so system doesn't break
+      this.createDefaultSkills(); 
       return;
     }
 
@@ -59,26 +41,10 @@ class SkillLoader implements ISkillRegistry {
     console.log(`[SkillLoader] Loaded ${this.skills.size} skills: ${[...this.skills.keys()].join(", ")}`);
   }
 
-  // ── loadFile ───────────────────────────────────────────────────────────────
-  // Internal helper that reads and parses one .md file.
-  // Called by loadAll() at startup and by the file watcher when files change.
-
   private async loadFile(filePath: string): Promise<void> {
     try {
       const rawContent = fs.readFileSync(filePath, "utf-8");
 
-      // gray-matter splits the file into:
-      //   parsed.data    → the YAML frontmatter object
-      //   parsed.content → the Markdown body below the --- lines
-      //
-      // Example .md file:
-      //   ---
-      //   name: commercial
-      //   version: "1.2"
-      //   trigger: prospect, devis, client, vente
-      //   ---
-      //   ## Instructions pour réunions commerciales
-      //   ...
       const parsed = matter(rawContent);
 
       // Extract the skill name from frontmatter, fall back to filename
@@ -112,29 +78,12 @@ class SkillLoader implements ISkillRegistry {
 
     } catch (error) {
       // Log the error but don't crash the server
-      // A broken skill file should not take down the whole system
       console.error(`[SkillLoader] Failed to load ${filePath}:`, (error as Error).message);
     }
   }
-
-  // ── get ────────────────────────────────────────────────────────────────────
-  // Returns a skill by exact name, or null if not found.
-
   get(skillName: string): ISkill | null {
     return this.skills.get(skillName) || null;
   }
-
-  // ── detect ─────────────────────────────────────────────────────────────────
-  // Automatically detects which skill best matches a transcript.
-  //
-  // Algorithm:
-  //   1. Lowercase the full transcript
-  //   2. For each skill, count how many of its trigger keywords appear
-  //   3. The skill with the most keyword matches wins
-  //   4. If no keywords match at all, return the "general" skill
-  //
-  // This is intentionally simple — more sophisticated ML-based detection
-  // can replace this logic without changing the interface.
 
   detect(transcript: string): ISkill {
     const lowerTranscript = transcript.toLowerCase();
@@ -148,8 +97,6 @@ class SkillLoader implements ISkillRegistry {
 
       let score = 0;
       for (const trigger of skill.triggers) {
-        // Count occurrences, not just presence
-        // "prospect" appearing 5 times is stronger signal than once
         const regex = new RegExp(trigger, "gi");
         const matches = lowerTranscript.match(regex);
         if (matches) score += matches.length;
@@ -177,10 +124,6 @@ class SkillLoader implements ISkillRegistry {
     // If even general doesn't exist, something is very wrong
     throw new Error("[SkillLoader] No skills loaded — call loadAll() first");
   }
-
-  // ── createDefaultSkills ────────────────────────────────────────────────────
-  // Creates default .md files if the skills directory is empty.
-  // Ensures the system always has something to work with.
 
   private createDefaultSkills(): void {
     const defaults: Record<string, string> = {
@@ -298,7 +241,4 @@ Format du rapport :
   }
 }
 
-// Export a single instance — this is the pattern for all modules.
-// Every other file that needs the skill registry imports this instance.
-// There is only ever ONE SkillLoader in the entire application.
 export const skillRegistry = new SkillLoader();

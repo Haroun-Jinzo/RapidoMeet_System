@@ -1,13 +1,6 @@
 import { INLPOutput } from "./INLPOutput";
 import { IAction } from "./IAction";
 
-/**
- * C4 Component: Intent Router
- * File: src/router.ts
- *
- * The ONLY module allowed to call the AI model for routing decisions.
- * Takes extraction output → returns ordered list of actions to execute.
- */
 export interface IIntentRouter {
   decide(
     extraction:   INLPOutput,  // What was found in the meeting
@@ -17,6 +10,3 @@ export interface IIntentRouter {
     apiKeys?: any
   ): Promise<IAction[]>;
 }
-/**
- * Result of executing one action via N8N.
- */

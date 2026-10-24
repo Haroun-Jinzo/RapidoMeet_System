@@ -873,7 +873,7 @@ export class ConnectionsStore {
         .eq("id", existing.id)
         .select("*")
         .single();
-
+        
       if (error || !data) {
         throw new Error(`[ConnectionsStore] Telegram update failed: ${error?.message}`);
       }

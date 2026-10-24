@@ -1,18 +1,3 @@
-/**
- * NLP Extraction Service using Google Gemini
- * 
- * This module extracts structured business data from meeting transcripts:
- * - Actionable tasks with deadlines and priorities
- * - Critical business decisions
- * - Sales leads and prospect information
- * - Overall sentiment and meeting summary
- * 
- * All Gemini output is validated using Zod schemas to catch hallucinations
- * and formatting errors before they propagate downstream.
- * 
- * Dependencies: Google Gemini 2.0 Flash API, Zod for validation
- */
-
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { OpenAI } from "openai";
 import Anthropic from "@anthropic-ai/sdk";
@@ -28,22 +13,9 @@ import {
 import { CircuitBreaker } from "./resilience/CircuitBreaker";
 import { GEMINI_CONFIG, CIRCUIT_BREAKER_CONFIG } from "./config/services";
 
-// ============================================================================
 // Zod Validation Schemas
-// ============================================================================
 
 /**
- * Zod schemas define the REQUIRED shape of Gemini's JSON responses
- * 
- * Why validate AI output?
- * - Gemini is powerful but not perfectly predictable
- * - It might omit fields, use wrong types, or include extra data
- * - Validation catches errors early before crashing downstream code
- * - Provides detailed error messages for debugging failed extractions
- * 
- * Rule: Never trust AI output without validation
- */
-
 /** Schema for an individual task extracted from the transcript */
 const TaskSchema = z.object({
   title:    z.string().min(1).describe("Action item title"),
@@ -98,31 +70,18 @@ const NLPOutputSchema = z.object({
   skillUsed: z.string().describe("Which skill was applied"),
 });
 
-// ============================================================================
 // Task Extractor Class
-// ============================================================================
 
 class TaskExtractor implements ITaskExtractor {
   private circuitBreaker: CircuitBreaker;
 
   constructor() {
-    // Initialize circuit breaker to protect against Gemini API failures
-    // When Gemini experiences repeated timeouts/errors, circuit breaker
-    // will fail fast instead of cascading into retry storms
     this.circuitBreaker = new CircuitBreaker('gemini-extractor', CIRCUIT_BREAKER_CONFIG);
     
     console.log("[TaskExtractor] Gemini client initialised with circuit breaker protection");
   }
 
   /**
-   * Extract structured business data from meeting transcripts
-   * 
-   * Pipeline:
-   * 1. Build prompt with active Skill instructions and transcript
-   * 2. Call Gemini API via circuit breaker
-   * 3. Parse JSON response and validate against Zod schema
-   * 4. Return structured data or throw validation error
-   * 
    * @param transcript - Full meeting transcript text
    * @param meetingType - Type of meeting (for context to Gemini)
    * @param skillContent - Active Skill instructions from .md file
@@ -170,13 +129,13 @@ class TaskExtractor implements ITaskExtractor {
         } else if (provider === "anthropic" || provider === "claude") {
           const anthropic = new Anthropic({ apiKey });
           const response = await anthropic.messages.create({
-            model: "claude-3-5-sonnet-20241022", // Default to an optimal model
+            model: "claude-3-5-sonnet-20241022",
             system: systemPrompt,
             messages: [{ role: "user", content: userPrompt }],
             temperature: GEMINI_CONFIG.temperature,
             max_tokens: 2048,
           });
-          // Anthropic types structure requires casting depending on SDK version
+          
           return (response.content[0] as any).text || "{}";
         } else {
           // Default: Gemini
@@ -229,14 +188,6 @@ class TaskExtractor implements ITaskExtractor {
   }
 
   /**
-   * Build the system prompt (constant across all requests)
-   * 
-   * The system prompt defines Gemini's role and constrains its behavior.
-   * It emphasizes structure, validation rules, and quality standards.
-   * 
-   * This prompt is returned directly by generateContent() config, so it
-   * affects ALL requests from this model instance.
-   * 
    * @returns System prompt string
    */
   private buildSystemPrompt(): string {
@@ -259,17 +210,6 @@ STRICT RULES:
   }
 
   /**
-   * Build the user prompt for this specific request
-   * 
-   * The user prompt is unique per extraction. It contains:
-   * - Active Skill instructions (from loaded .md file)
-   * - Meeting type and context
-   * - The transcript to analyze
-   * - Exact JSON schema expected
-   * 
-   * Skill instructions appear first because Gemini weights earlier
-   * instructions more heavily than later ones.
-   * 
    * @param transcript - Full meeting transcript
    * @param meetingType - Context for the extraction
    * @param skillContent - Active Skill instructions
@@ -333,16 +273,6 @@ Return ONLY the JSON object. No other text, no markdown formatting.
   }
 
   /**
-   * Parse and validate Gemini's JSON response
-   * 
-   * Two-phase process:
-   * 1. Parse raw JSON (handle markdown wrapping edge cases)
-   * 2. Validate shape/types with Zod
-   * 3. Convert nulls to undefined (JS convention)
-   * 
-   * Zod provides detailed error messages if validation fails,
-   * which we log for debugging.
-   * 
    * @param rawText - Raw response from Gemini
    * @param meetingType - Type of meeting (for fallback skillUsed)
    * @param skillContent - Skill content (for reference only)
@@ -357,12 +287,11 @@ Return ONLY the JSON object. No other text, no markdown formatting.
     // Step 1: Parse JSON (defensively strip markdown wrapping)
     let parsed: unknown;
     try {
-      // Sometimes Gemini wraps JSON in ```json ... ``` even with responseMimeType
       // We strip these defensive measures to handle edge cases
       const cleaned = rawText
-        .replace(/^```json\s*/i, "")  // Remove opening ```json
-        .replace(/^```\s*/i, "")      // Remove opening ```
-        .replace(/```\s*$/i, "")      // Remove closing ```
+        .replace(/^```json\s*/i, "")  
+        .replace(/^```\s*/i, "")      
+        .replace(/```\s*$/i, "")      
         .trim();
 
       parsed = JSON.parse(cleaned);
@@ -394,9 +323,6 @@ Return ONLY the JSON object. No other text, no markdown formatting.
     // Step 3: Convert nulls to undefined (Zod result uses null, but our interfaces use undefined)
     const validated = validationResult.data;
 
-    // Convert null → undefined for all optional fields
-    // This is a JS convention: undefined means "not provided", null means "explicitly null"
-    // Our type definitions use undefined, so we need this conversion
     return {
       summary:   validated.summary,
       sentiment: validated.sentiment,
@@ -428,18 +354,4 @@ Return ONLY the JSON object. No other text, no markdown formatting.
   }
 }
 
-// ============================================================================
-// Singleton Export
-// ============================================================================
-
-/**
- * Global task extractor instance
- * 
- * Exported as singleton so all modules share the same Gemini client.
- * Reduces initialization overhead and reuses API connections.
- * 
- * Usage in other modules:
- *   import { taskExtractor } from './extract';
- *   await taskExtractor.extract(transcript, meetingType, skillContent);
- */
 export const taskExtractor = new TaskExtractor();

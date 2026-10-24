@@ -34,7 +34,6 @@ async function getDecryptedCredentials(userId: string, integrationId: string): P
       .single();
 
     if (error || !data?.credentials) {
-      console.warn(`[KeyResolver] No credentials found in user_connections for integration_id: ${integrationId}`);
       return null;
     }
     const creds = data.credentials as any;

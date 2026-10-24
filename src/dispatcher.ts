@@ -1,15 +1,3 @@
-// src/dispatcher.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// C4 Level 3: MCP Dispatcher
-// Routes tools to:
-//   - RapidoCRM MCP (OAuth Bearer per user) for crm_* tools
-//   - RapidoCMS MCP (OAuth Bearer per user) for cms_* tools
-//   - Rapido RH MCP (OAuth Bearer per user) for rh_* tools
-//   - Local Supabase for db_save_task
-//   - Google Calendar API for calendar_create_event
-//   - n8n MCP hub for everything else (email, telegram, …)
-// ─────────────────────────────────────────────────────────────────────────────
-
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
@@ -539,9 +527,13 @@ class MCPDispatcher implements IMCPDispatcher {
     if (action.tool === "db_save_task") {
       try {
         console.log("[Dispatcher] Intercepted db_save_task: Routing directly to local Supabase");
+        const title = typeof action.params.title === "string" ? action.params.title.trim() : "";
+        if (!title) {
+          throw new Error("Task requires a non-empty title.");
+        }
 
         const id = await memoryManager.saveTask({
-          title: action.params.title as string,
+          title,
           assignee: (action.params.assignee as string) || undefined,
           deadline: (action.params.deadline as string) || undefined,
           priority: action.params.priority as "high" | "medium" | "low",

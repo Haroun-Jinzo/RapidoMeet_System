@@ -1,12 +1,3 @@
-// src/session.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// C4 Level 3: Session Manager
-// Interface:  ISessionManager (from interfaces.ts)
-// Responsibility: Create, save, load, and delete session objects in Redis.
-//                 A session tracks one meeting through the full pipeline.
-// Dependencies: Redis only — no database, no AI, no filesystem.
-// ─────────────────────────────────────────────────────────────────────────────
-
 import Redis            from "ioredis";
 import { nanoid }       from "nanoid";
 import {
@@ -15,9 +6,7 @@ import {
   MeetingType,
 } from "./interfaces";
 
-// How long a session lives in Redis before auto-deletion.
-// 2 hours is more than enough for any meeting + processing time.
-const SESSION_TTL_SECONDS = 60 * 60 * 2; // 7200 seconds
+const SESSION_TTL_SECONDS = 60 * 60 * 2;
 
 class SessionManager implements ISessionManager {
 
@@ -30,13 +19,9 @@ class SessionManager implements ISessionManager {
   constructor() {
     try {
       // Connect to Redis using the environment variable.
-      // ioredis handles reconnection automatically if the connection drops.
       this.redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379", {
-        // Don't block on connection — lazy connect means try on first use
         lazyConnect: true,
-        // Retry connection up to 2 times before giving up
         maxRetriesPerRequest: 2,
-        // Connection timeout
         connectTimeout: 2000,
         tls: process.env.REDIS_URL?.startsWith('rediss://') ? { rejectUnauthorized: false } : undefined
       });
@@ -49,7 +34,7 @@ class SessionManager implements ISessionManager {
         this.isRedisAvailable = false;
       });
 
-      // Attempt initial connection but don't block if it fails
+      // Attempt initial connection
       this.redis.connect().catch(() => {
         console.warn("[Session] ⚠️  Could not connect to Redis — using in-memory storage for testing");
         this.isRedisAvailable = false;
@@ -60,19 +45,10 @@ class SessionManager implements ISessionManager {
       this.isRedisAvailable = false;
     }
   }
-  // ── PRIVATE: makeKey ───────────────────────────────────────────────────────
-  // Generates the Redis key for a session.
-  // Using a prefix "session:" lets us find all sessions easily with SCAN.
 
   private makeKey(sessionId: string): string {
     return `session:${sessionId}`;
   }
-
-  // ── PRIVATE: generateId ────────────────────────────────────────────────────
-  // Creates a human-readable unique session ID.
-  // Example output: "sess_20260314_a3f9k2"
-  //   - Date prefix makes it easy to find recent sessions in logs
-  //   - nanoid suffix guarantees uniqueness
 
   private generateId(): string {
     const date = new Date()
@@ -82,10 +58,6 @@ class SessionManager implements ISessionManager {
     const random = nanoid(6).toLowerCase(); // "a3f9k2"
     return `sess_${date}_${random}`;
   }
-
-  // ── create ─────────────────────────────────────────────────────────────────
-  // Creates a brand new session at the start of a meeting.
-  // This is always the first step — nothing else can run without a session.
 
   async create(
     userId:       string,
@@ -97,10 +69,9 @@ class SessionManager implements ISessionManager {
       userId,
       meetingTitle,
       meetingType,
-      participants: [],           // Will be filled in from the UI or transcript
+      participants: [],           
       startedAt:    new Date(),
       status:       "processing", // Pipeline starts immediately
-      // transcript, extraction, actions → undefined until filled by later steps
     };
 
     // Save to Redis immediately
@@ -109,10 +80,6 @@ class SessionManager implements ISessionManager {
     console.log(`[Session] Created: ${session.id} (${meetingType})`);
     return session;
   }
-
-  // ── save ───────────────────────────────────────────────────────────────────
-  // Saves (or overwrites) a session in Redis.
-  // Called after EVERY step that modifies the session so state is never lost.
 
   async save(session: ISessionContext): Promise<void> {
     const key  = this.makeKey(session.id);
@@ -124,50 +91,37 @@ class SessionManager implements ISessionManager {
     // Try Redis first, fall back to memory
     if (this.redis && this.isRedisAvailable) {
       try {
-        // SET key value EX ttl
-        // The EX option means "expire after N seconds"
         await this.redis.set(key, data, "EX", SESSION_TTL_SECONDS);
       } catch {
         // If Redis fails, use memory storage
         this.memoryStorage.set(key, data);
       }
     } else {
-      // Redis not available, use memory
       this.memoryStorage.set(key, data);
     }
   }
-
-  // ── load ───────────────────────────────────────────────────────────────────
-  // Retrieves a session from Redis by ID.
-  // Returns null if the session has expired or was never created.
 
   async load(sessionId: string): Promise<ISessionContext | null> {
     const key  = this.makeKey(sessionId);
     let data: string | null = null;
 
-    // Try Redis first
     if (this.redis && this.isRedisAvailable) {
       try {
         data = await this.redis.get(key);
       } catch {
-        // Redis failed, try memory
         data = this.memoryStorage.get(key) || null;
       }
     } else {
-      // Redis not available, use memory
       data = this.memoryStorage.get(key) || null;
     }
 
     if (!data) {
-      // Session doesn't exist — either expired or wrong ID
       return null;
     }
 
-    // Parse the JSON back into an object
     const parsed = JSON.parse(data);
 
     // Dates are stored as ISO strings — convert them back to Date objects
-    // If we don't do this, date comparisons and formatting break
     return {
       ...parsed,
       startedAt: new Date(parsed.startedAt),
@@ -175,6 +129,4 @@ class SessionManager implements ISessionManager {
   }
 }
 
-// Export a single shared instance.
-// Every part of the app that needs session management imports this.
 export const sessionManager = new SessionManager();

@@ -1,5 +1,7 @@
 import { MCPTool } from "./MCPTool";
 
+
+
 export type PendingActionStatus =
   | "pending"
   | "approved"
@@ -7,12 +9,8 @@ export type PendingActionStatus =
   | "executed"
   | "failed";
 
-/**
- * Logical view of a pending action (mapped from Supabase `pending_actions`).
- *
- * DB columns: id, created_at, action_type, payload, status, metadata, user_id
- */
 export interface IPendingAction {
+
   id?:          string;
   action_id:    string;
   session_id:   string;
@@ -21,6 +19,7 @@ export interface IPendingAction {
   params:       Record<string, unknown>;
   status:       PendingActionStatus;
   created_at?:  string;
+
 }
 
 export interface IPendingActionInsert {
@@ -30,5 +29,7 @@ export interface IPendingActionInsert {
   actionTool: MCPTool | string;
   params:     Record<string, unknown>;
   status?:    PendingActionStatus;
+
 }
-
+
+
